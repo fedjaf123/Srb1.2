@@ -4592,8 +4592,13 @@ def run_ui(db_path: Path) -> None:
         "expense_year": None,
         "expense_month": None,
         "expense_top_n": 5,
+        "prodaja_period_days": None,
+        "prodaja_period_start": None,
+        "prodaja_period_end": None,
     }
     btn_reset_matches = None
+    PRODAJA_CSV = Path("Kalkulacije_kartice_art/izlaz/prodaja_avg_i_gubitak.csv")
+    _prodaja_cache = {"mtime": None, "df": pd.DataFrame()}
 
     def get_conn():
         conn = connect_db(state["db_path"])
@@ -4676,6 +4681,75 @@ def run_ui(db_path: Path) -> None:
                 return val * rate
         return val
 
+    def _parse_user_date(text: str) -> date | None:
+        value = (text or "").strip()
+        if not value:
+            return None
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(value, fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    def _load_prodaja_dataframe() -> pd.DataFrame:
+        path = PRODAJA_CSV
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            _prodaja_cache["df"] = pd.DataFrame()
+            _prodaja_cache["mtime"] = None
+            return _prodaja_cache["df"]
+        if _prodaja_cache["mtime"] == mtime and not _prodaja_cache["df"].empty:
+            return _prodaja_cache["df"]
+        try:
+            df = pd.read_csv(
+                path,
+                parse_dates=["Prvi datum", "Zadnji datum"],
+                dayfirst=False,
+                encoding="utf-8",
+            )
+        except Exception:
+            _prodaja_cache["df"] = pd.DataFrame()
+            _prodaja_cache["mtime"] = mtime
+            return _prodaja_cache["df"]
+        numeric_cols = [
+            "Total prodato",
+            "Dani bez zalihe",
+            "Prosek dnevno",
+            "Ukupno neto",
+            "Prosek neto",
+            "Procjena gubitka neto",
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        _prodaja_cache["df"] = df
+        _prodaja_cache["mtime"] = mtime
+        return df
+
+    def _resolve_prodaja_period():
+        start = state.get("prodaja_period_start")
+        end = state.get("prodaja_period_end")
+        days = state.get("prodaja_period_days")
+        if days and start is None and end is None:
+            today = datetime.utcnow().date()
+            end = today
+            start = today - timedelta(days=days - 1)
+        return start, end
+
+    def _filter_prodaja_by_period(
+        df: pd.DataFrame, start: date | None, end: date | None
+    ) -> pd.DataFrame:
+        if df.empty:
+            return df
+        mask = pd.Series(True, index=df.index)
+        if start is not None and "Zadnji datum" in df.columns:
+            mask &= df["Zadnji datum"].dt.date >= start
+        if end is not None and "Prvi datum" in df.columns:
+            mask &= df["Prvi datum"].dt.date <= end
+        return df.loc[mask]
+
     def get_progress_info(task: str):
         conn = get_conn()
         try:
@@ -4739,6 +4813,7 @@ def run_ui(db_path: Path) -> None:
         refresh_expenses()
         refresh_returns_charts()
         refresh_unpicked_charts()
+        refresh_prodaja_tab()
         try:
             status_var.set("Osvjezeno.")
             app.after(1500, lambda: status_var.set("Spremno."))
@@ -6235,7 +6310,7 @@ def run_ui(db_path: Path) -> None:
     tabs.pack(fill="both", expand=True, padx=12, pady=8)
 
     tab_dashboard = tabs.add("Dashboard")
-    tabs.add("Prodaja")
+    tab_prodaja = tabs.add("Prodaja")
     tabs.add("Marze")
     tab_troskovi = tabs.add("Troskovi")
     tab_povrati = tabs.add("Povrati")
@@ -6244,6 +6319,152 @@ def run_ui(db_path: Path) -> None:
     tabs.add("Kupci")
     tab_poslovanje = tabs.add("Poslovanje")
     tab_settings = tabs.add("Podesavanja aplikacije")
+
+    prodaja_ops = ctk.CTkFrame(tab_prodaja)
+    prodaja_ops.pack(fill="x", padx=10, pady=10)
+
+    ctk.CTkLabel(prodaja_ops, text="Period:").pack(side="left", padx=(6, 4))
+    prodaja_period_var = ctk.StringVar(value="12 mjeseci")
+    period_mapping = {
+        "Svo vrijeme": None,
+        "3 mjeseca": 90,
+        "6 mjeseci": 180,
+        "12 mjeseci": 360,
+        "24 mjeseca": 720,
+    }
+
+    def on_prodaja_period_change(choice: str):
+        state["prodaja_period_days"] = period_mapping.get(choice)
+        state["prodaja_period_start"] = None
+        state["prodaja_period_end"] = None
+        prodaja_custom_from_var.set("")
+        prodaja_custom_to_var.set("")
+        prodaja_period_summary_var.set("")
+        refresh_prodaja_tab()
+
+    prodaja_period_menu = ctk.CTkOptionMenu(
+        prodaja_ops,
+        values=list(period_mapping.keys()),
+        variable=prodaja_period_var,
+        command=on_prodaja_period_change,
+    )
+    prodaja_period_menu.pack(side="left", padx=4)
+
+    prodaja_custom_from_var = ctk.StringVar(value="")
+    prodaja_custom_to_var = ctk.StringVar(value="")
+    ctk.CTkLabel(prodaja_ops, text="Od (YYYY-MM-DD):").pack(side="left", padx=(12, 4))
+    prodaja_from_entry = ctk.CTkEntry(prodaja_ops, width=120, textvariable=prodaja_custom_from_var)
+    prodaja_from_entry.pack(side="left", padx=4)
+    ctk.CTkLabel(prodaja_ops, text="Do (YYYY-MM-DD):").pack(side="left", padx=(12, 4))
+    prodaja_to_entry = ctk.CTkEntry(prodaja_ops, width=120, textvariable=prodaja_custom_to_var)
+    prodaja_to_entry.pack(side="left", padx=4)
+
+    def apply_prodaja_custom():
+        start = _parse_user_date(prodaja_custom_from_var.get())
+        end = _parse_user_date(prodaja_custom_to_var.get())
+        if start is None or end is None:
+            messagebox.showerror("Greska", "Unesi ispravan period (YYYY-MM-DD).")
+            return
+        if end < start:
+            messagebox.showerror("Greska", "Datum završetka mora biti poslije početka.")
+            return
+        state["prodaja_period_days"] = None
+        state["prodaja_period_start"] = start
+        state["prodaja_period_end"] = end
+        prodaja_period_summary_var.set("")
+        refresh_prodaja_tab()
+
+    ctk.CTkButton(prodaja_ops, text="Primijeni period", command=apply_prodaja_custom).pack(
+        side="left", padx=(12, 4)
+    )
+    prodaja_period_summary_var = ctk.StringVar(value="")
+    ctk.CTkLabel(prodaja_ops, textvariable=prodaja_period_summary_var).pack(
+        side="left", padx=12
+    )
+
+    prodaja_content = ctk.CTkFrame(tab_prodaja)
+    prodaja_content.pack(fill="both", expand=True, padx=10, pady=10)
+    prodaja_left = ctk.CTkFrame(prodaja_content)
+    prodaja_left.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+    prodaja_right = ctk.CTkFrame(prodaja_content)
+    prodaja_right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+
+    ctk.CTkLabel(prodaja_left, text="Top 5 potencijalni gubici (neto):").pack(
+        anchor="w", padx=6, pady=(6, 4)
+    )
+    prodaja_top5_txt = ctk.CTkTextbox(prodaja_left, height=260)
+    prodaja_top5_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+    prodaja_top5_txt.configure(state="disabled")
+
+    ctk.CTkLabel(prodaja_right, text="Top 10 sve vrijeme (neto gubitak):").pack(
+        anchor="w", padx=6, pady=(6, 4)
+    )
+    prodaja_top10_txt = ctk.CTkTextbox(prodaja_right, height=260)
+    prodaja_top10_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+    prodaja_top10_txt.configure(state="disabled")
+
+    prodaja_hints = ctk.CTkLabel(
+        prodaja_right,
+        text="Korišteni period filtrira procjene gubitka po dostupnosti; top 10 sve vrijeme ignorira period.",
+        wraplength=320,
+        justify="left",
+    )
+    prodaja_hints.pack(anchor="w", padx=6, pady=(0, 6))
+
+    def _format_prodaja_entry(idx: int, row: dict) -> str:
+        loss = format_amount(row.get("Procjena gubitka neto", 0))
+        days = int(row.get("Dani bez zalihe", 0) or 0)
+        avg_net = format_amount(row.get("Prosek neto", 0))
+        art = row.get("Artikal", "")
+        sku = row.get("SKU", "")
+        return f"{idx}. {sku} — {art}\n   Gubitak: {loss}, Dani: {days}, Prosek neto: {avg_net}"
+
+    def _render_prodaja_textbox(widget: ctk.CTkTextbox, lines: list[str]):
+        widget.configure(state="normal")
+        widget.delete("0.0", "end")
+        widget.insert("0.0", "\n\n".join(lines))
+        widget.configure(state="disabled")
+
+    def refresh_prodaja_tab():
+        df = _load_prodaja_dataframe()
+        start, end = _resolve_prodaja_period()
+        if start and end:
+            prodaja_period_summary_var.set(f"Period: {start.isoformat()} → {end.isoformat()}")
+        elif start:
+            prodaja_period_summary_var.set(f"Period: od {start.isoformat()}")
+        elif end:
+            prodaja_period_summary_var.set(f"Period: do {end.isoformat()}")
+        else:
+            prodaja_period_summary_var.set("Period: svi podaci")
+
+        filtered = _filter_prodaja_by_period(df, start, end)
+        if filtered.empty:
+            _render_prodaja_textbox(
+                prodaja_top5_txt, ["Nema podataka za odabrani period."]
+            )
+        else:
+            top5 = (
+                filtered.sort_values("Procjena gubitka neto", ascending=False)
+                .head(5)
+                .to_dict("records")
+            )
+            lines = [_format_prodaja_entry(i + 1, row) for i, row in enumerate(top5)]
+            _render_prodaja_textbox(prodaja_top5_txt, lines)
+
+        if df.empty:
+            _render_prodaja_textbox(
+                prodaja_top10_txt, ["Nema dostupnih podataka za top 10."]
+            )
+        else:
+            top10 = (
+                df.sort_values("Procjena gubitka neto", ascending=False)
+                .head(10)
+                .to_dict("records")
+            )
+            lines10 = [_format_prodaja_entry(i + 1, row) for i, row in enumerate(top10)]
+            _render_prodaja_textbox(prodaja_top10_txt, lines10)
+
+    refresh_prodaja_tab()
 
     settings_body = ctk.CTkFrame(tab_settings)
     settings_body.pack(fill="both", expand=True, padx=12, pady=12)
