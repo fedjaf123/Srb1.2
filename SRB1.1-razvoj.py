@@ -3903,6 +3903,8 @@ def run_regenerate_sku_metrics_process(
     prijemi_root: str,
     out_dir: str,
     sp_db_path: str,
+    progress_db_path: str,
+    task_name: str = "regen_metrics",
 ) -> None:
     import subprocess
     import sys
@@ -3919,23 +3921,33 @@ def run_regenerate_sku_metrics_process(
     prijemi_root_p = Path(prijemi_root)
     out_dir_p = Path(out_dir)
     sp_db_p = Path(sp_db_path)
+    progress_db_p = Path(progress_db_path)
+
+    conn = connect_db(progress_db_p)
+    init_db(conn)
+    set_task_progress(conn, task_name, total=3)
+    update_task_progress(conn, task_name, 0)
 
     pdf_path = latest_file(pdf_root_p, "*.pdf")
     if pdf_path is None:
         pdf_path = latest_file(Path.cwd(), "*.pdf")
     if pdf_path is None:
+        conn.close()
         raise RuntimeError(
             f"Nema PDF kartice u folderu '{pdf_root_p}' (ni u root folderu)."
         )
     if not prijemi_root_p.exists():
+        conn.close()
         raise RuntimeError(f"Nema foldera za SP Prijemi: '{prijemi_root_p}'.")
     if not sp_db_p.exists():
-        raise RuntimeError(f"Nema SP baze (SRB1.0 - Copy.db): '{sp_db_p}'.")
+        conn.close()
+        raise RuntimeError(f"Nema baze: '{sp_db_p}'.")
 
     extract_script = Path(__file__).with_name("extract_kalkulacije_kartice.py")
     build_script = Path(__file__).with_name("build_sku_daily_metrics.py")
     out_dir_p.mkdir(parents=True, exist_ok=True)
 
+    update_task_progress(conn, task_name, 1)
     cmd1 = [
         sys.executable,
         str(extract_script),
@@ -3949,10 +3961,12 @@ def run_regenerate_sku_metrics_process(
     ]
     r1 = subprocess.run(cmd1, capture_output=True, text=True, check=False)
     if r1.returncode != 0:
+        conn.close()
         raise RuntimeError(
             f"extract_kalkulacije_kartice.py greska:\n{r1.stderr or r1.stdout}"
         )
 
+    update_task_progress(conn, task_name, 2)
     cmd2 = [
         sys.executable,
         str(build_script),
@@ -3967,9 +3981,12 @@ def run_regenerate_sku_metrics_process(
     ]
     r2 = subprocess.run(cmd2, capture_output=True, text=True, check=False)
     if r2.returncode != 0:
+        conn.close()
         raise RuntimeError(
             f"build_sku_daily_metrics.py greska:\n{r2.stderr or r2.stdout}"
         )
+    update_task_progress(conn, task_name, 3)
+    conn.close()
 
 
 def report_unmatched_with_candidates(
@@ -4933,6 +4950,7 @@ def run_ui(db_path: Path) -> None:
     import tkinter as tk
     import time
     from tkinter import filedialog, messagebox
+    from tkcalendar import Calendar
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
 
@@ -5099,12 +5117,166 @@ def run_ui(db_path: Path) -> None:
         value = (text or "").strip()
         if not value:
             return None
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d.%m.%Y"):
             try:
                 return datetime.strptime(value, fmt).date()
             except ValueError:
                 continue
         return None
+
+    def _format_user_date(value: date) -> str:
+        return value.strftime("%d-%m-%Y")
+
+    def _add_calendar_picker(parent, var: ctk.StringVar, width: int = 120):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        entry = ctk.CTkEntry(row, width=width, textvariable=var)
+        entry.pack(side="left", padx=(0, 6))
+
+        def open_calendar():
+            top = tk.Toplevel(app)
+            top.title("Odabir datuma")
+            try:
+                top.transient(app)
+                top.grab_set()
+            except Exception:
+                pass
+
+            current = _parse_user_date(var.get())
+            cal = Calendar(
+                top,
+                selectmode="day",
+                date_pattern="dd-mm-y",
+                showweeknumbers=False,
+            )
+            if current is not None:
+                try:
+                    cal.selection_set(current)
+                    cal.see(current)
+                except Exception:
+                    pass
+            cal.pack(padx=10, pady=10)
+
+            btns = tk.Frame(top)
+            btns.pack(fill="x", padx=10, pady=(0, 10))
+
+            def on_ok():
+                try:
+                    picked = cal.selection_get()
+                    var.set(_format_user_date(picked))
+                except Exception:
+                    pass
+                top.destroy()
+
+            def on_clear():
+                var.set("")
+                top.destroy()
+
+            tk.Button(btns, text="OK", command=on_ok, width=10).pack(
+                side="left", padx=4
+            )
+            tk.Button(btns, text="Ocisti", command=on_clear, width=10).pack(
+                side="left", padx=4
+            )
+            tk.Button(btns, text="Cancel", command=top.destroy, width=10).pack(
+                side="right", padx=4
+            )
+
+        ctk.CTkButton(row, text="Odaberi", width=90, command=open_calendar).pack(
+            side="left"
+        )
+        return row, entry
+
+    def _pick_date_range_dialog(
+        title: str, initial_start: date | None, initial_end: date | None
+    ) -> tuple[date | None, date | None]:
+        result = {"start": initial_start, "end": initial_end}
+
+        top = tk.Toplevel(app)
+        top.title(title)
+        try:
+            top.transient(app)
+            top.grab_set()
+        except Exception:
+            pass
+
+        info = tk.Label(
+            top,
+            text="Klikni prvo pocetni datum, pa zatim krajnji datum.\n"
+            "Možeš mijenjati mjesec/godinu gore na strelicama.",
+            justify="left",
+        )
+        info.pack(anchor="w", padx=10, pady=(10, 4))
+
+        status = tk.Label(top, text="", justify="left")
+        status.pack(anchor="w", padx=10, pady=(0, 6))
+
+        cal = Calendar(
+            top,
+            selectmode="day",
+            date_pattern="dd-mm-y",
+            showweeknumbers=False,
+        )
+        if initial_start is not None:
+            try:
+                cal.selection_set(initial_start)
+                cal.see(initial_start)
+            except Exception:
+                pass
+        cal.pack(padx=10, pady=10)
+
+        click_state = {"phase": "start"}
+
+        def update_status():
+            s = result["start"]
+            e = result["end"]
+            s_txt = s.strftime("%d-%m-%Y") if s else "-"
+            e_txt = e.strftime("%d-%m-%Y") if e else "-"
+            status.configure(text=f"Od: {s_txt}    Do: {e_txt}")
+
+        def on_select(_evt=None):
+            picked = None
+            try:
+                picked = cal.selection_get()
+            except Exception:
+                picked = None
+            if picked is None:
+                return
+            if click_state["phase"] == "start":
+                result["start"] = picked
+                result["end"] = None
+                click_state["phase"] = "end"
+            else:
+                result["end"] = picked
+                click_state["phase"] = "start"
+                if result["start"] and result["end"] and result["end"] < result["start"]:
+                    result["start"], result["end"] = result["end"], result["start"]
+            update_status()
+
+        cal.bind("<<CalendarSelected>>", on_select)
+        update_status()
+
+        btns = tk.Frame(top)
+        btns.pack(fill="x", padx=10, pady=(0, 10))
+
+        def on_ok():
+            top.destroy()
+
+        def on_reset():
+            result["start"] = None
+            result["end"] = None
+            click_state["phase"] = "start"
+            update_status()
+
+        tk.Button(btns, text="OK", command=on_ok, width=10).pack(side="left", padx=4)
+        tk.Button(btns, text="Reset", command=on_reset, width=10).pack(
+            side="left", padx=4
+        )
+        tk.Button(btns, text="Cancel", command=lambda: (result.update({"start": None, "end": None}), top.destroy()), width=10).pack(
+            side="right", padx=4
+        )
+
+        app.wait_window(top)
+        return result["start"], result["end"]
 
     def _load_sku_daily_dataframe() -> pd.DataFrame:
         path = SKU_DAILY_CSV
@@ -6822,6 +6994,8 @@ def run_ui(db_path: Path) -> None:
         for btn in action_buttons:
             btn.configure(state="disabled")
         status_var.set(f"Radi: {label}...")
+        task_status_var.set(f"Task: {label}")
+        last_error_var.set("Zadnja greska: -")
         if progress_task:
             progress.configure(mode="determinate")
             progress.set(0)
@@ -6860,6 +7034,14 @@ def run_ui(db_path: Path) -> None:
                             else None
                         )
                         progress_eta_var.set(f"ETA: {format_eta(eta)}")
+                    try:
+                        if progress_task == REGEN_TASK:
+                            regen_progress.set(pct_display)
+                            regen_progress_var.set(
+                                f"Regenerisanje metrika: {int(pct * 100)}%"
+                            )
+                    except Exception:
+                        pass
             if not future.done():
                 app.after(5000, poll)
                 return
@@ -6867,6 +7049,12 @@ def run_ui(db_path: Path) -> None:
                 progress.set(1)
                 progress_pct_var.set("Napredak: 100%")
                 progress_eta_var.set("ETA: 0s")
+                try:
+                    if progress_task == REGEN_TASK:
+                        regen_progress.set(1)
+                        regen_progress_var.set("Regenerisanje metrika: 100%")
+                except Exception:
+                    pass
             else:
                 progress.stop()
             for btn in action_buttons:
@@ -6875,10 +7063,18 @@ def run_ui(db_path: Path) -> None:
                 future.result()
             except Exception as exc:
                 log_app_error(label, str(exc))
+                last_error_var.set(f"Zadnja greska: {exc}")
+                task_status_var.set("Task: greska")
+                try:
+                    if progress_task == REGEN_TASK:
+                        regen_progress_var.set("Regenerisanje metrika: greska")
+                except Exception:
+                    pass
                 messagebox.showerror("Greska", str(exc))
                 status_var.set("Greska.")
                 return
             status_var.set("Zavrseno.")
+            task_status_var.set("Task: zavrseno")
             refresh_dashboard()
             refresh_poslovanje_lists()
             if on_success is not None:
@@ -6886,6 +7082,11 @@ def run_ui(db_path: Path) -> None:
                     on_success()
                 except Exception:
                     pass
+            try:
+                if progress_task == REGEN_TASK:
+                    regen_progress_var.set("Regenerisanje metrika: zavrseno")
+            except Exception:
+                pass
 
         poll()
 
@@ -6918,7 +7119,11 @@ def run_ui(db_path: Path) -> None:
     PDF_ROOT = Path("Kalkulacije_kartice_art")
     PRIJEMI_ROOT = Path("SP Prijemi")
     METRICS_OUT = Path("Kalkulacije_kartice_art/izlaz")
-    SP_DB = Path("SRB1.0 - Copy.db")
+    SP_DB = state["db_path"]
+    REGEN_TASK = "regen_metrics"
+    regen_progress_var = ctk.StringVar(value="")
+    regen_progress = ctk.CTkProgressBar(top, mode="determinate")
+    regen_progress.set(0)
 
     def confirm_regen_metrics():
         ok = messagebox.askyesno(
@@ -6931,16 +7136,24 @@ def run_ui(db_path: Path) -> None:
         )
         if not ok:
             return
+        regen_progress_var.set("Regenerisanje metrika: 0%")
+        regen_progress.set(0)
+        regen_progress.configure(mode="determinate")
         run_action_async_process(
             run_regenerate_sku_metrics_process,
-            [str(PDF_ROOT), str(PRIJEMI_ROOT), str(METRICS_OUT), str(SP_DB)],
+            [str(PDF_ROOT), str(PRIJEMI_ROOT), str(METRICS_OUT), str(SP_DB), str(state["db_path"]), REGEN_TASK],
             "Regenerisi metrike",
+            progress_task=REGEN_TASK,
             on_success=refresh_external_views,
         )
 
-    ctk.CTkButton(top, text="Regenerisi metrike", command=confirm_regen_metrics).pack(
-        side="left", padx=6
+    regen_box = ctk.CTkFrame(top, fg_color="transparent")
+    regen_box.pack(side="left", padx=6)
+    ctk.CTkButton(regen_box, text="Regenerisi metrike", command=confirm_regen_metrics).pack(
+        anchor="w"
     )
+    regen_progress.pack(in_=regen_box, fill="x", pady=(4, 0))
+    ctk.CTkLabel(regen_box, textvariable=regen_progress_var).pack(anchor="w", pady=(2, 0))
     task_status_var = ctk.StringVar(value="Task: idle")
     last_error_var = ctk.StringVar(value="Zadnja greska: -")
     ctk.CTkLabel(top, textvariable=task_status_var).pack(side="left", padx=12)
@@ -6974,7 +7187,7 @@ def run_ui(db_path: Path) -> None:
 
     prodaja_tabs = ctk.CTkTabview(tab_prodaja)
     prodaja_tabs.pack(fill="both", expand=True, padx=10, pady=10)
-    tab_prodaja_pregled = prodaja_tabs.add("Pregled")
+    tab_prodaja_pregled = prodaja_tabs.add("Out of stock gubitci")
     tab_prodaja_trending = prodaja_tabs.add("Trending proizvodi")
     tab_prodaja_snizenja = prodaja_tabs.add("Analiza sniženja")
 
@@ -7039,20 +7252,20 @@ def run_ui(db_path: Path) -> None:
         command=on_prodaja_period_change,
     ).pack(side="left", padx=4)
 
-    ctk.CTkLabel(pregled_ops, text="Od (YYYY-MM-DD):").pack(side="left", padx=(12, 4))
-    ctk.CTkEntry(pregled_ops, width=120, textvariable=prodaja_custom_from_var).pack(
-        side="left", padx=4
+    ctk.CTkLabel(pregled_ops, text="Od (DD-MM-YYYY):").pack(side="left", padx=(12, 4))
+    row_from, _ent_from = _add_calendar_picker(
+        pregled_ops, prodaja_custom_from_var, width=120
     )
-    ctk.CTkLabel(pregled_ops, text="Do (YYYY-MM-DD):").pack(side="left", padx=(12, 4))
-    ctk.CTkEntry(pregled_ops, width=120, textvariable=prodaja_custom_to_var).pack(
-        side="left", padx=4
-    )
+    row_from.pack(side="left", padx=4)
+    ctk.CTkLabel(pregled_ops, text="Do (DD-MM-YYYY):").pack(side="left", padx=(12, 4))
+    row_to, _ent_to = _add_calendar_picker(pregled_ops, prodaja_custom_to_var, width=120)
+    row_to.pack(side="left", padx=4)
 
     def apply_prodaja_custom():
         start = _parse_user_date(prodaja_custom_from_var.get())
         end = _parse_user_date(prodaja_custom_to_var.get())
         if start is None or end is None:
-            messagebox.showerror("Greska", "Unesi ispravan period (YYYY-MM-DD).")
+            messagebox.showerror("Greska", "Unesi ispravan period (DD-MM-YYYY).")
             return
         if end < start:
             messagebox.showerror("Greska", "Datum završetka mora biti poslije početka.")
@@ -7076,19 +7289,64 @@ def run_ui(db_path: Path) -> None:
     pregled_right = ctk.CTkFrame(pregled_body)
     pregled_right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
 
-    ctk.CTkLabel(pregled_left, text="Top 5 (period) - potencijalni gubici (neto):").pack(
-        anchor="w", padx=6, pady=(6, 4)
-    )
-    pregled_top5_txt = ctk.CTkTextbox(pregled_left, height=260)
-    pregled_top5_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-    pregled_top5_txt.configure(state="disabled")
+    pregled_left_header = ctk.CTkFrame(pregled_left)
+    pregled_left_header.pack(fill="x", padx=6, pady=(6, 6))
+    ctk.CTkLabel(pregled_left_header, text="Prikaz:").pack(side="left", padx=(0, 6))
+    pregled_scope_var = ctk.StringVar(value="Period")
+    ctk.CTkOptionMenu(
+        pregled_left_header,
+        values=["Period", "Sve vrijeme"],
+        variable=pregled_scope_var,
+        command=lambda _v: refresh_prodaja_pregled(),
+    ).pack(side="left", padx=4)
+    ctk.CTkLabel(pregled_left_header, text="Top:").pack(side="left", padx=(12, 6))
+    pregled_topn_var = ctk.StringVar(value="5")
+    ctk.CTkOptionMenu(
+        pregled_left_header,
+        values=["5", "10"],
+        variable=pregled_topn_var,
+        command=lambda _v: refresh_prodaja_pregled(),
+        width=80,
+    ).pack(side="left", padx=4)
 
-    ctk.CTkLabel(
-        pregled_right, text="Top 10 (sve vrijeme) - potencijalni gubici (neto):"
-    ).pack(anchor="w", padx=6, pady=(6, 4))
-    pregled_top10_txt = ctk.CTkTextbox(pregled_right, height=260)
-    pregled_top10_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-    pregled_top10_txt.configure(state="disabled")
+    ctk.CTkLabel(pregled_left, text="Potencijalni OOS gubitci (neto):").pack(
+        anchor="w", padx=6, pady=(0, 4)
+    )
+    pregled_top_txt = ctk.CTkTextbox(pregled_left, height=360)
+    pregled_top_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+    pregled_top_txt.configure(state="disabled")
+
+    pregled_right_header = ctk.CTkFrame(pregled_right)
+    pregled_right_header.pack(fill="x", padx=6, pady=(6, 6))
+    ctk.CTkLabel(pregled_right_header, text="Artikal/SKU:").pack(
+        side="left", padx=(0, 6)
+    )
+    pregled_search_var = ctk.StringVar(value="")
+    ent_pregled_search = ctk.CTkEntry(
+        pregled_right_header, textvariable=pregled_search_var, width=220
+    )
+    ent_pregled_search.pack(side="left", padx=4)
+    pregled_selected_sku_var = ctk.StringVar(value="")
+    sku_menu = ctk.CTkOptionMenu(
+        pregled_right_header,
+        values=[""],
+        variable=pregled_selected_sku_var,
+        width=160,
+    )
+    sku_menu.pack(side="left", padx=(12, 4))
+    ctk.CTkButton(
+        pregled_right_header,
+        text="Prikazi",
+        command=lambda: refresh_prodaja_pregled(),
+        width=100,
+    ).pack(side="left", padx=4)
+
+    ctk.CTkLabel(pregled_right, text="Detalji po artiklu:").pack(
+        anchor="w", padx=6, pady=(0, 4)
+    )
+    pregled_details_txt = ctk.CTkTextbox(pregled_right, height=360)
+    pregled_details_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+    pregled_details_txt.configure(state="disabled")
 
     def refresh_prodaja_pregled():
         daily = _load_sku_daily_dataframe()
@@ -7096,7 +7354,7 @@ def run_ui(db_path: Path) -> None:
         start, end = _resolve_prodaja_period()
         if start and end:
             prodaja_period_summary_var.set(
-                f"Period: {start.isoformat()} → {end.isoformat()}"
+                f"Period: {start.isoformat()} - {end.isoformat()}"
             )
         elif start:
             prodaja_period_summary_var.set(f"Period: od {start.isoformat()}")
@@ -7106,8 +7364,8 @@ def run_ui(db_path: Path) -> None:
             prodaja_period_summary_var.set("Period: svi podaci")
 
         if daily.empty:
-            _render_textbox(pregled_top5_txt, ["Nema podataka. Pokreni metrike."])
-            _render_textbox(pregled_top10_txt, ["Nema podataka."])
+            _render_textbox(pregled_top_txt, ["Nema podataka. Pokreni metrike."])
+            _render_textbox(pregled_details_txt, ["Nema podataka."])
             return
 
         filtered = _filter_daily_by_period(daily, start, end)
@@ -7126,43 +7384,228 @@ def run_ui(db_path: Path) -> None:
                 f"   Gubitak: {lost_val} | Izgubljeno: {lost_qty:.2f} kom | OOS dana: {oos_days} | Prodato: {net_qty:.2f}"
             )
 
-        if agg_period.empty:
-            _render_textbox(pregled_top5_txt, ["Nema podataka za odabrani period."])
+        scope = pregled_scope_var.get().strip()
+        try:
+            top_n = int(pregled_topn_var.get().strip() or "5")
+        except Exception:
+            top_n = 5
+        top_n = 5 if top_n not in (5, 10) else top_n
+
+        agg_src = agg_period if scope == "Period" else agg_all
+        if agg_src.empty:
+            msg = (
+                "Nema podataka za odabrani period."
+                if scope == "Period"
+                else "Nema dostupnih podataka."
+            )
+            _render_textbox(pregled_top_txt, [msg])
         else:
-            top5 = (
-                agg_period.sort_values("lost_value", ascending=False)
-                .head(5)
+            top = (
+                agg_src.sort_values("lost_value", ascending=False)
+                .head(top_n)
                 .to_dict("records")
             )
             _render_textbox(
-                pregled_top5_txt, [fmt_row(i + 1, r) for i, r in enumerate(top5)]
+                pregled_top_txt, [fmt_row(i + 1, r) for i, r in enumerate(top)]
             )
 
-        if agg_all.empty:
-            _render_textbox(pregled_top10_txt, ["Nema dostupnih podataka za top 10."])
+        search = pregled_search_var.get().strip().lower()
+        all_skus = sorted(set(daily["sku"].astype(str).str.strip().tolist()))
+        if search:
+            matches = []
+            for sku in all_skus:
+                name = name_map.get(sku, "")
+                if search in sku.lower() or (name and search in name.lower()):
+                    matches.append(sku)
+            matches = matches[:50]
         else:
-            top10 = (
-                agg_all.sort_values("lost_value", ascending=False)
-                .head(10)
-                .to_dict("records")
-            )
+            matches = all_skus[:50]
+
+        if not matches:
+            matches = [""]
+        try:
+            sku_menu.configure(values=matches)
+        except Exception:
+            pass
+        if pregled_selected_sku_var.get() not in matches:
+            pregled_selected_sku_var.set(matches[0])
+
+        sel = (pregled_selected_sku_var.get() or "").strip()
+        if not sel:
             _render_textbox(
-                pregled_top10_txt, [fmt_row(i + 1, r) for i, r in enumerate(top10)]
+                pregled_details_txt,
+                ["Unesi SKU ili naziv (pretraga) pa izaberi artikal."],
             )
+            return
+
+        sku_name = name_map.get(sel, "")
+        sku_df = daily.loc[daily["sku"].astype(str).str.strip() == sel].copy()
+        if sku_df.empty:
+            _render_textbox(pregled_details_txt, [f"Nema podataka za {sel}."])
+            return
+
+        agg_sel = _aggregate_by_sku(sku_df)
+        row = agg_sel.iloc[0].to_dict() if not agg_sel.empty else {}
+        lost_val = format_amount(row.get("lost_value", 0))
+        lost_qty = float(row.get("lost_qty", 0) or 0)
+        oos_days = int(row.get("oos_days", 0) or 0)
+        net_qty = float(row.get("net_qty", 0) or 0)
+        demand_qty = float(row.get("demand_qty", 0) or 0)
+
+        last_price = (
+            pd.to_numeric(sku_df.get("sp_unit_net_price", 0), errors="coerce")
+            .fillna(0)
+            .loc[lambda s: s > 0]
+            .tail(1)
+        )
+        last_price_val = float(last_price.iloc[0]) if len(last_price) else 0.0
+
+        sku_df = sku_df.sort_values("date_dt")
+        last_rows = sku_df.tail(14)
+        lines = [
+            f"{sel} - {sku_name}",
+            f"OOS dana: {oos_days} | Prodato (net): {net_qty:.2f} kom",
+            f"Potraznja baseline (sum): {demand_qty:.2f} | Izgubljeno: {lost_qty:.2f} kom",
+            f"Procijenjeni gubitak (neto): {lost_val}",
+        ]
+        if last_price_val > 0:
+            lines.append(f"Zadnja poznata cijena (net): {last_price_val:.2f}")
+        lines.append("")
+        lines.append("Zadnjih 14 dana (datum | stock_eod | OOS | net_prod | izgubljeno):")
+        for _, r in last_rows.iterrows():
+            lines.append(
+                f"{str(r.get('date') or '')} | "
+                f"{float(r.get('stock_eod_qty') or 0):.0f} | "
+                f"{int(r.get('oos_flag') or 0)} | "
+                f"{float(r.get('net_sales_qty') or 0):.2f} | "
+                f"{float(r.get('lost_sales_qty') or 0):.2f}"
+            )
+        _render_textbox(pregled_details_txt, lines)
+
+    def export_oos_gubitci_excel():
+        daily = _load_sku_daily_dataframe()
+        if daily.empty:
+            messagebox.showinfo("Info", "Nema podataka. Pokreni metrike.")
+            return
+
+        start, end = _resolve_prodaja_period()
+        scope = pregled_scope_var.get().strip()
+        if scope == "Period":
+            df = _filter_daily_by_period(daily, start, end)
+        else:
+            df = daily.copy()
+
+        if df.empty:
+            messagebox.showinfo("Info", "Nema podataka za odabrani period.")
+            return
+
+        agg = (
+            df.groupby("sku", dropna=False)
+            .agg(
+                OOS_dani=("oos_flag", "sum"),
+                Potraznja=("demand_baseline_qty", "sum"),
+                Izgubljeno_kom=("lost_sales_qty", "sum"),
+                Procijenjeni_gubitak_neto=("lost_sales_value_est", "sum"),
+            )
+            .reset_index()
+        )
+        name_map = _sku_name_map()
+        agg.insert(
+            1,
+            "Artikal",
+            agg["sku"].astype(str).map(lambda s: name_map.get(str(s).strip(), "")),
+        )
+        agg = agg.sort_values("Procijenjeni_gubitak_neto", ascending=False)
+
+        exports_dir = Path("exports")
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if scope == "Period" and start and end:
+            label = f"period_{start.isoformat()}_{end.isoformat()}"
+        elif scope == "Period" and start:
+            label = f"od_{start.isoformat()}"
+        elif scope == "Period" and end:
+            label = f"do_{end.isoformat()}"
+        else:
+            label = "sve_vrijeme"
+        out_path = exports_dir / f"oos_gubitci_{label}_{stamp}.xlsx"
+        try:
+            agg.to_excel(out_path, index=False, engine="openpyxl")
+        except Exception as exc:
+            messagebox.showerror("Greska", f"Ne mogu sacuvati Excel: {exc}")
+            return
+        try:
+            os.startfile(str(out_path))  # type: ignore[attr-defined]
+        except Exception:
+            messagebox.showinfo("Info", f"Sacuvano: {out_path}")
+
+    ctk.CTkButton(
+        pregled_ops, text="Export Excel (OOS)", command=export_oos_gubitci_excel
+    ).pack(side="left", padx=(12, 4))
 
     # --- Trending proizvodi ---
     trending_ops = ctk.CTkFrame(tab_prodaja_trending)
     trending_ops.pack(fill="x", padx=10, pady=(10, 6))
+
     trending_from_var = ctk.StringVar(value="")
     trending_to_var = ctk.StringVar(value="")
+    trending_period_var = ctk.StringVar(value="Period: -")
+    trending_topn_var = ctk.StringVar(value="5")
     trending_summary_var = ctk.StringVar(value="")
-    ctk.CTkLabel(trending_ops, text="Od (YYYY-MM-DD):").pack(side="left", padx=(6, 4))
-    ctk.CTkEntry(trending_ops, width=120, textvariable=trending_from_var).pack(
-        side="left", padx=4
+
+    def _resolve_trending_period(daily: pd.DataFrame) -> tuple[date | None, date | None]:
+        start = _parse_user_date(trending_from_var.get())
+        end = _parse_user_date(trending_to_var.get())
+        if start is None or end is None or end < start:
+            max_date = daily["date_dt"].max()
+            if pd.isna(max_date):
+                return None, None
+            end = max_date
+            start = end - timedelta(days=29)
+            trending_from_var.set(_format_user_date(start))
+            trending_to_var.set(_format_user_date(end))
+        return start, end
+
+    def _update_trending_period_label(start: date | None, end: date | None) -> None:
+        if start and end:
+            trending_period_var.set(
+                f"Period: {start.strftime('%d-%m-%Y')} - {end.strftime('%d-%m-%Y')}"
+            )
+        else:
+            trending_period_var.set("Period: -")
+
+    def pick_trending_period():
+        cur_start = _parse_user_date(trending_from_var.get())
+        cur_end = _parse_user_date(trending_to_var.get())
+        s, e = _pick_date_range_dialog("Odaberi period", cur_start, cur_end)
+        if s and e:
+            trending_from_var.set(_format_user_date(s))
+            trending_to_var.set(_format_user_date(e))
+        _update_trending_period_label(
+            _parse_user_date(trending_from_var.get()),
+            _parse_user_date(trending_to_var.get()),
+        )
+        refresh_trending()
+
+    ctk.CTkButton(trending_ops, text="Odaberi period", command=pick_trending_period).pack(
+        side="left", padx=(6, 6)
     )
-    ctk.CTkLabel(trending_ops, text="Do (YYYY-MM-DD):").pack(side="left", padx=(12, 4))
-    ctk.CTkEntry(trending_ops, width=120, textvariable=trending_to_var).pack(
-        side="left", padx=4
+    ctk.CTkLabel(trending_ops, textvariable=trending_period_var).pack(
+        side="left", padx=(0, 12)
+    )
+    ctk.CTkLabel(trending_ops, text="Top:").pack(side="left", padx=(6, 4))
+    ctk.CTkOptionMenu(
+        trending_ops,
+        values=["5", "10"],
+        variable=trending_topn_var,
+        width=90,
+        command=lambda _v: refresh_trending(),
+    ).pack(side="left", padx=4)
+    ctk.CTkButton(trending_ops, text="Primijeni", command=lambda: refresh_trending()).pack(
+        side="left", padx=(12, 4)
+    )
+    ctk.CTkLabel(trending_ops, textvariable=trending_summary_var).pack(
+        side="left", padx=12
     )
 
     trending_body = ctk.CTkFrame(tab_prodaja_trending)
@@ -7171,44 +7614,143 @@ def run_ui(db_path: Path) -> None:
     trending_left.pack(side="left", fill="both", expand=True, padx=6, pady=6)
     trending_right = ctk.CTkFrame(trending_body)
     trending_right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-    ctk.CTkLabel(trending_left, text="Top 5 trending (potražnja):").pack(
+
+    ctk.CTkLabel(trending_left, text="Trending lista (potražnja):").pack(
         anchor="w", padx=6, pady=(6, 4)
     )
-    trending_top5_txt = ctk.CTkTextbox(trending_left, height=260)
-    trending_top5_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-    trending_top5_txt.configure(state="disabled")
-    ctk.CTkLabel(trending_right, text="Top 10 trending (potražnja):").pack(
-        anchor="w", padx=6, pady=(6, 4)
+    trending_list_txt = ctk.CTkTextbox(trending_left, height=520)
+    trending_list_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+    trending_list_txt.configure(state="disabled")
+
+    trending_right_header = ctk.CTkFrame(trending_right)
+    trending_right_header.pack(fill="x", padx=6, pady=(6, 6))
+    ctk.CTkLabel(trending_right_header, text="SKU / Artikal:").pack(
+        side="left", padx=(0, 6)
     )
-    trending_top10_txt = ctk.CTkTextbox(trending_right, height=260)
-    trending_top10_txt.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-    trending_top10_txt.configure(state="disabled")
+    trending_search_var = ctk.StringVar(value="")
+    ent_trending_search = ctk.CTkEntry(
+        trending_right_header, textvariable=trending_search_var, width=240
+    )
+    ent_trending_search.pack(side="left", padx=4)
+    trending_selected_sku_var = ctk.StringVar(value="")
+    trending_sku_menu = ctk.CTkOptionMenu(
+        trending_right_header,
+        values=[""],
+        variable=trending_selected_sku_var,
+        width=170,
+    )
+    trending_sku_menu.pack(side="left", padx=(12, 4))
+
+    trending_chart_title_var = ctk.StringVar(value="Graf (odaberi SKU)")
+    ctk.CTkLabel(trending_right, textvariable=trending_chart_title_var).pack(
+        anchor="w", padx=6, pady=(0, 4)
+    )
+
+    fig_trend = Figure(figsize=(5, 3), dpi=100)
+    ax_trend = fig_trend.add_subplot(111)
+    ax_trend.grid(True, color="#d0d0d0", linewidth=0.8)
+    canvas_trend = FigureCanvasTkAgg(fig_trend, master=trending_right)
+    canvas_trend.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=(0, 6))
+
+    def _sku_suggestions(query: str, skus: list[str], name_map: dict[str, str]) -> list[str]:
+        import difflib
+
+        q = (query or "").strip().lower()
+        if not q:
+            return skus[:50]
+        exact = [s for s in skus if s.lower() == q]
+        starts = [s for s in skus if s.lower().startswith(q) and s.lower() != q]
+        contains = [
+            s
+            for s in skus
+            if q in s.lower()
+            or (name_map.get(s, "") and q in name_map.get(s, "").lower())
+        ]
+        close = difflib.get_close_matches(q, skus, n=20, cutoff=0.6)
+        out: list[str] = []
+        for grp in (exact, starts, contains, close):
+            for s in grp:
+                if s not in out:
+                    out.append(s)
+        return out[:50] if out else skus[:50]
+
+    def refresh_trending_chart():
+        daily = _load_sku_daily_dataframe()
+        if daily.empty:
+            ax_trend.clear()
+            ax_trend.grid(True, color="#d0d0d0", linewidth=0.8)
+            trending_chart_title_var.set("Graf (nema podataka)")
+            canvas_trend.draw_idle()
+            return
+
+        name_map = _sku_name_map()
+        sku = (trending_selected_sku_var.get() or "").strip()
+        start, end = _resolve_trending_period(daily)
+        _update_trending_period_label(start, end)
+        if not sku or start is None or end is None:
+            ax_trend.clear()
+            ax_trend.grid(True, color="#d0d0d0", linewidth=0.8)
+            trending_chart_title_var.set("Graf (odaberi SKU)")
+            canvas_trend.draw_idle()
+            return
+
+        days_len = (end - start).days + 1
+        prev_end = start - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=days_len - 1)
+
+        cur = _filter_daily_by_period(daily, start, end)
+        prev = _filter_daily_by_period(daily, prev_start, prev_end)
+
+        cur_s = cur.loc[cur["sku"] == sku].groupby("date_dt")["demand_baseline_qty"].sum()
+        prev_s = prev.loc[prev["sku"] == sku].groupby("date_dt")["demand_baseline_qty"].sum()
+
+        cur_dates = [start + timedelta(days=i) for i in range(days_len)]
+        prev_dates = [prev_start + timedelta(days=i) for i in range(days_len)]
+        cur_vals = [float(cur_s.get(d, 0.0)) for d in cur_dates]
+        prev_vals = [float(prev_s.get(d, 0.0)) for d in prev_dates]
+
+        cur_cum = []
+        prev_cum = []
+        run = 0.0
+        for v in cur_vals:
+            run += v
+            cur_cum.append(run)
+        run = 0.0
+        for v in prev_vals:
+            run += v
+            prev_cum.append(run)
+
+        x = list(range(1, days_len + 1))
+        ax_trend.clear()
+        ax_trend.grid(True, color="#d0d0d0", linewidth=0.8)
+        ax_trend.plot(x, cur_cum, color="#1f7a1f", linewidth=3)
+        ax_trend.plot(x, prev_cum, color="#d97a00", linewidth=3)
+        ax_trend.set_xlim(1, days_len)
+        ax_trend.set_ylabel("Kumulativna potražnja")
+        ax_trend.set_xlabel("Dan u periodu")
+        trending_chart_title_var.set(
+            f"{sku} - {name_map.get(sku,'')} | {start.strftime('%d-%m-%Y')} - {end.strftime('%d-%m-%Y')} (zeleno) vs prethodni period (narandžasto)"
+        )
+        canvas_trend.draw_idle()
 
     def refresh_trending():
         daily = _load_sku_daily_dataframe()
         name_map = _sku_name_map()
-        start = _parse_user_date(trending_from_var.get())
-        end = _parse_user_date(trending_to_var.get())
         if daily.empty:
-            _render_textbox(trending_top5_txt, ["Nema podataka."])
-            _render_textbox(trending_top10_txt, ["Nema podataka."])
+            _render_textbox(trending_list_txt, ["Nema podataka."])
             return
-        if start is None or end is None or end < start:
-            max_date = daily["date_dt"].max()
-            if pd.isna(max_date):
-                _render_textbox(trending_top5_txt, ["Nema datuma u podacima."])
-                _render_textbox(trending_top10_txt, ["Nema datuma u podacima."])
-                return
-            end = max_date
-            start = end - timedelta(days=29)
-            trending_from_var.set(start.isoformat())
-            trending_to_var.set(end.isoformat())
+
+        start, end = _resolve_trending_period(daily)
+        _update_trending_period_label(start, end)
+        if start is None or end is None:
+            _render_textbox(trending_list_txt, ["Nema datuma u podacima."])
+            return
 
         days_len = (end - start).days + 1
         prev_end = start - timedelta(days=1)
         prev_start = prev_end - timedelta(days=days_len - 1)
         trending_summary_var.set(
-            f"Poređenje: {start.isoformat()} → {end.isoformat()} vs {prev_start.isoformat()} → {prev_end.isoformat()}"
+            f"Poređenje: {start.isoformat()} - {end.isoformat()} vs {prev_start.isoformat()} - {prev_end.isoformat()}"
         )
 
         cur = _filter_daily_by_period(daily, start, end)
@@ -7232,16 +7774,39 @@ def run_ui(db_path: Path) -> None:
             pct_txt = f"{pct*100:.1f}%" if isinstance(pct, (int, float)) and pct is not None else "-"
             return (
                 f"{idx}. {sku} - {art}\n"
-                f"   Potražnja: {curv:.2f} | Prethodno: {prevv:.2f} | Δ: {delta:.2f} | %: {pct_txt}"
+                f"   Potražnja: {curv:.2f} | Prethodno: {prevv:.2f} | Delta: {delta:.2f} | %: {pct_txt}"
             )
 
-        _render_textbox(trending_top5_txt, [fmt(i + 1, r) for i, r in enumerate(rows[:5])])
-        _render_textbox(trending_top10_txt, [fmt(i + 1, r) for i, r in enumerate(rows[:10])])
+        try:
+            top_n = int(trending_topn_var.get() or "5")
+        except Exception:
+            top_n = 5
+        top_n = 5 if top_n not in (5, 10) else top_n
+        _render_textbox(trending_list_txt, [fmt(i + 1, r) for i, r in enumerate(rows[:top_n])])
 
-    ctk.CTkButton(trending_ops, text="Primijeni", command=refresh_trending).pack(
-        side="left", padx=(12, 4)
-    )
-    ctk.CTkLabel(trending_ops, textvariable=trending_summary_var).pack(side="left", padx=12)
+        all_skus = sorted(set(daily["sku"].astype(str).str.strip().tolist()))
+        suggestions = _sku_suggestions(trending_search_var.get(), all_skus, name_map)
+        if not suggestions:
+            suggestions = [""]
+        try:
+            trending_sku_menu.configure(values=suggestions)
+        except Exception:
+            pass
+        if trending_selected_sku_var.get() not in suggestions:
+            q = (trending_search_var.get() or "").strip()
+            trending_selected_sku_var.set(q if q in suggestions else suggestions[0])
+
+        refresh_trending_chart()
+
+    def _on_trending_search_change(*_args):
+        refresh_trending()
+
+    def _on_trending_sku_change(*_args):
+        refresh_trending_chart()
+
+    trending_search_var.trace_add("write", _on_trending_search_change)
+    trending_selected_sku_var.trace_add("write", _on_trending_sku_change)
+    refresh_trending()
 
     # --- Analiza sniženja ---
     snizenja_ops = ctk.CTkFrame(tab_prodaja_snizenja)
@@ -7250,10 +7815,12 @@ def run_ui(db_path: Path) -> None:
     sniz_to_var = ctk.StringVar(value="")
     pre_window_var = ctk.StringVar(value="2")
     sniz_summary_var = ctk.StringVar(value="")
-    ctk.CTkLabel(snizenja_ops, text="Od (YYYY-MM-DD):").pack(side="left", padx=(6, 4))
-    ctk.CTkEntry(snizenja_ops, width=120, textvariable=sniz_from_var).pack(side="left", padx=4)
-    ctk.CTkLabel(snizenja_ops, text="Do (YYYY-MM-DD):").pack(side="left", padx=(12, 4))
-    ctk.CTkEntry(snizenja_ops, width=120, textvariable=sniz_to_var).pack(side="left", padx=4)
+    ctk.CTkLabel(snizenja_ops, text="Od (DD-MM-YYYY):").pack(side="left", padx=(6, 4))
+    srow_from, _sfrom = _add_calendar_picker(snizenja_ops, sniz_from_var, width=120)
+    srow_from.pack(side="left", padx=4)
+    ctk.CTkLabel(snizenja_ops, text="Do (DD-MM-YYYY):").pack(side="left", padx=(12, 4))
+    srow_to, _sto = _add_calendar_picker(snizenja_ops, sniz_to_var, width=120)
+    srow_to.pack(side="left", padx=4)
     ctk.CTkLabel(snizenja_ops, text="Pre-period (mjeseci):").pack(side="left", padx=(12, 4))
     ctk.CTkOptionMenu(snizenja_ops, values=["1", "2", "3", "4", "5"], variable=pre_window_var).pack(
         side="left", padx=4
@@ -7282,8 +7849,8 @@ def run_ui(db_path: Path) -> None:
                 return
             end = max_date
             start = end - timedelta(days=180)
-            sniz_from_var.set(start.isoformat())
-            sniz_to_var.set(end.isoformat())
+            sniz_from_var.set(_format_user_date(start))
+            sniz_to_var.set(_format_user_date(end))
 
         pre_days = int(pre_window_var.get() or "2") * 30
         sniz_summary_var.set(f"Promo {start.isoformat()} → {end.isoformat()} | Pre-period: {pre_days} dana")

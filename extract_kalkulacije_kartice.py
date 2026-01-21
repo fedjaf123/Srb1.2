@@ -322,6 +322,8 @@ def write_zero_intervals_from_parsed(parsed: list[KarticaRow], output_dir: Path)
     events: dict[str, list[StockEvent]] = {}
     article_names: dict[str, str] = {}
     for row in parsed:
+        if str(row.doc).strip().upper() == "POCETNO":
+            continue
         events.setdefault(row.sku, []).append(
             StockEvent(date=row.date, qty=row.stanje_kolicina, doc=row.doc)
         )
@@ -340,9 +342,6 @@ def write_zero_intervals_from_parsed(parsed: list[KarticaRow], output_dir: Path)
             qty = event.qty
             if prev_qty is None:
                 prev_qty = qty
-                if qty <= 0:
-                    zero_start = event.date
-                    zero_start_doc = event.doc
                 continue
 
             if prev_qty > 0 and qty <= 0 and zero_start is None:
@@ -395,6 +394,72 @@ def write_zero_intervals_from_parsed(parsed: list[KarticaRow], output_dir: Path)
         writer.writeheader()
         writer.writerows(rows)
     return out_path
+
+
+def _rewrite_zero_intervals_with_availability(
+    zero_csv: Path, receipts_summary_csv: Path
+) -> None:
+    """
+    Prevents counting '0 stock' intervals before first verified availability.
+    Uses 'prvi_verifikovan' from SP Prijemi summary when available.
+    """
+    if not zero_csv.exists() or not receipts_summary_csv.exists():
+        return
+    try:
+        zdf = pd.read_csv(zero_csv, encoding="utf-8")
+        rdf = pd.read_csv(receipts_summary_csv, encoding="utf-8")
+    except Exception:
+        return
+    if zdf.empty or rdf.empty:
+        return
+    if "SKU" not in zdf.columns or "SKU" not in rdf.columns:
+        return
+    if "prvi_verifikovan" not in rdf.columns:
+        return
+
+    rdf = rdf.copy()
+    rdf["SKU"] = rdf["SKU"].astype(str).str.strip()
+    rdf["prvi_verifikovan_dt"] = pd.to_datetime(
+        rdf["prvi_verifikovan"], errors="coerce"
+    ).dt.date
+    avail = (
+        rdf.dropna(subset=["prvi_verifikovan_dt"])
+        .groupby("SKU")["prvi_verifikovan_dt"]
+        .min()
+        .to_dict()
+    )
+    if not avail:
+        return
+
+    zdf = zdf.copy()
+    zdf["SKU"] = zdf["SKU"].astype(str).str.strip()
+    zdf["Zero od_dt"] = pd.to_datetime(zdf.get("Zero od"), errors="coerce").dt.date
+    zdf["Zero do_dt"] = pd.to_datetime(zdf.get("Zero do"), errors="coerce").dt.date
+
+    out_rows = []
+    for _, r in zdf.iterrows():
+        sku = str(r.get("SKU") or "").strip()
+        if not sku:
+            continue
+        a = avail.get(sku)
+        z0 = r.get("Zero od_dt")
+        z1 = r.get("Zero do_dt")
+        if a is None or pd.isna(z0):
+            out_rows.append(r)
+            continue
+        if z1 is not None and not pd.isna(z1) and z1 < a:
+            continue
+        if z0 < a:
+            r["Zero od"] = a.isoformat()
+            r["Zero od_dt"] = a
+        if z1 is not None and not pd.isna(z1) and r["Zero od_dt"] >= z1:
+            continue
+        out_rows.append(r)
+
+    out = pd.DataFrame(out_rows).drop(
+        columns=["Zero od_dt", "Zero do_dt"], errors="ignore"
+    )
+    out.to_csv(zero_csv, index=False, encoding="utf-8")
 
 
 def extract_kartica_events_and_summary(pdf_path: Path, output_dir: Path) -> tuple[Path, Path, Path]:
@@ -877,6 +942,7 @@ def main() -> int:
             print(f"sp prijemi summary: {receipts_summary}")
             if not args.skip_pdf:
                 merge_receipts_into_kartice_summary(summary_path, receipts_summary)
+                _rewrite_zero_intervals_with_availability(zero_path, receipts_summary)
         else:
             print("sp prijemi: nema podataka")
 

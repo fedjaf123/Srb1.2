@@ -49,6 +49,8 @@ def load_kartice_events(events_csv: Path) -> pd.DataFrame:
         return df
     df["SKU"] = df["SKU"].astype(str).str.strip()
     df = df.loc[df["SKU"].astype(str).str.len() > 0]
+    if "Broj" in df.columns:
+        df = df.loc[df["Broj"].astype(str).str.strip().str.upper() != "POCETNO"]
     df["Datum"] = pd.to_datetime(df["Datum"], errors="coerce").dt.date
     df = df.loc[df["Datum"].notna()]
 
@@ -99,6 +101,7 @@ def build_daily_from_kartice(events: pd.DataFrame) -> pd.DataFrame:
             gross = float(sales.get(d, 0.0))
             ret = float(returns.get(d, 0.0))
             net = gross - ret
+            net_pos = max(0.0, net)
             stock = float(eod.loc[d]) if d in eod.index else 0.0
             rows.append(
                 {
@@ -109,6 +112,7 @@ def build_daily_from_kartice(events: pd.DataFrame) -> pd.DataFrame:
                     "gross_sales_qty": gross,
                     "return_qty": ret,
                     "net_sales_qty": net,
+                    "net_sales_qty_pos": net_pos,
                 }
             )
 
@@ -320,8 +324,11 @@ def apply_control_group_baseline(
     daily["date_dt"] = pd.to_datetime(daily["date"], errors="coerce")
     daily = daily.loc[daily["date_dt"].notna()]
 
-    # Pivot for fast access.
-    pivot_qty = daily.pivot(index="date_dt", columns="sku", values="net_sales_qty").fillna(0.0)
+    # Pivot for fast access. Use non-negative net sales for baseline logic.
+    qty_col = "net_sales_qty_pos" if "net_sales_qty_pos" in daily.columns else "net_sales_qty"
+    if qty_col == "net_sales_qty":
+        daily[qty_col] = pd.to_numeric(daily[qty_col], errors="coerce").fillna(0.0).clip(lower=0.0)
+    pivot_qty = daily.pivot(index="date_dt", columns="sku", values=qty_col).fillna(0.0)
     pivot_oos = daily.pivot(index="date_dt", columns="sku", values="oos_flag").fillna(0).astype(int)
 
     baselines = {}
@@ -445,10 +452,11 @@ def apply_control_group_baseline(
     conf_df.columns = ["date_dt", "sku", "confidence_score"]
 
     merged = daily.merge(base_df, on=["date_dt", "sku"], how="left").merge(method_df, on=["date_dt", "sku"], how="left").merge(conf_df, on=["date_dt", "sku"], how="left")
-    merged["demand_baseline_qty"] = pd.to_numeric(merged["demand_baseline_qty"], errors="coerce").fillna(0.0)
+    merged["demand_baseline_qty"] = pd.to_numeric(merged["demand_baseline_qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
     merged["confidence_score"] = pd.to_numeric(merged["confidence_score"], errors="coerce").fillna(0.0)
     merged["method_used"] = merged["method_used"].fillna("EWMA_FALLBACK")
-    merged["lost_sales_qty"] = (merged["demand_baseline_qty"] - merged["net_sales_qty"]).clip(lower=0)
+    net_pos = pd.to_numeric(merged.get("net_sales_qty_pos", merged["net_sales_qty"]), errors="coerce").fillna(0.0).clip(lower=0.0)
+    merged["lost_sales_qty"] = (merged["demand_baseline_qty"] - net_pos).clip(lower=0.0)
     merged.loc[merged["oos_flag"] == 0, "lost_sales_qty"] = 0.0
     return merged, pd.DataFrame(audits)
 
@@ -457,7 +465,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build per-SKU daily metrics (OOS + demand baseline + lost sales).")
     parser.add_argument("--events", type=Path, default=Path(r"Kalkulacije_kartice_art\izlaz\kartice_events.csv"))
     parser.add_argument("--receipts-summary", type=Path, default=Path(r"Kalkulacije_kartice_art\izlaz\sp_prijemi_summary.csv"))
-    parser.add_argument("--db", type=Path, default=Path(r"SRB1.0 - Copy.db"))
+    parser.add_argument("--db", type=Path, default=Path(r"SRB1.1-razvoj.db"))
     parser.add_argument("--sp-date-field", type=str, default="picked_up_at", choices=["picked_up_at", "created_at", "delivered_at"])
     parser.add_argument("--out", type=Path, default=Path(r"Kalkulacije_kartice_art\izlaz"))
     parser.add_argument("--start", type=str, default="")
@@ -518,12 +526,21 @@ def main() -> int:
         if col in daily.columns:
             daily[col] = pd.to_numeric(daily[col], errors="coerce").fillna(0.0)
 
+    # Price exists only on sales-days; forward-fill per SKU so OOS lost value uses last known price.
+    if "sp_unit_net_price" in daily.columns:
+        daily = daily.sort_values(["sku", "date"])
+        price = daily["sp_unit_net_price"].replace(0.0, math.nan)
+        daily["sp_unit_net_price"] = (
+            price.groupby(daily["sku"]).ffill().bfill().fillna(0.0)
+        )
+
     # Baseline + lost sales from qty series.
     daily, audit = apply_control_group_baseline(daily, cfg)
 
     # Don't count lost sales before first verified receipt (if known).
     if "verified_available_flag" in daily.columns:
         daily.loc[daily["verified_available_flag"] == 0, ["demand_baseline_qty", "lost_sales_qty"]] = 0.0
+        daily.loc[daily["verified_available_flag"] == 0, "oos_flag"] = 0
 
     daily["lost_sales_value_est"] = daily["lost_sales_qty"] * pd.to_numeric(daily["sp_unit_net_price"], errors="coerce").fillna(0.0)
 
