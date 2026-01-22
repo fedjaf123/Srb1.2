@@ -1,0 +1,13 @@
+{
+  "pdf_name": "kartica_artikala.pdf",
+  "range_start": "01.04.2024",
+  "range_end": "31.12.2025",
+  "final_end": "31.12.2025",
+  "range_start_iso": "2024-04-01",
+  "range_end_iso": "2025-12-31",
+  "final_end_iso": "2025-12-31",
+  "range_pages": 798,
+  "final_pages": 201,
+  "mismatch_final_vs_range_end": false,
+  "extracted_at": "2026-01-22 18:11:17"
+}

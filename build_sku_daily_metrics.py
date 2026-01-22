@@ -60,13 +60,20 @@ def load_kartice_events(events_csv: Path) -> pd.DataFrame:
         return pd.Series(0, index=df.index)
 
     df["Prijem_kolicina"] = num("Prijem kolicina")
+    df["Prijem_vrednost"] = num("Prijem vrednost")
     df["Izdavanje_kolicina"] = num("Izdavanje kolicina")
     df["Stanje_kolicina"] = num("Stanje zaliha kolicina")
     df["Smer"] = df.get("Smer", pd.Series("", index=df.index)).astype(str).str.strip().str.upper()
     df["Broj"] = df.get("Broj", pd.Series("", index=df.index)).astype(str).str.strip()
+    df["Tip"] = df.get("Tip", pd.Series("", index=df.index)).astype(str).str.strip().str.upper()
 
     df["is_sale"] = (df["Smer"] == "IZDAVANJE") & (df["Izdavanje_kolicina"] > 0)
     df["is_return"] = (df["Smer"] == "POVRAT") | (df["Izdavanje_kolicina"] < 0)
+    df["is_ps_receipt"] = (
+        ((df["Tip"] == "PS") | (df["Broj"].astype(str).str.upper().str.startswith("PS-")))
+        & (df["Prijem_kolicina"] > 0)
+        & (df["Prijem_vrednost"] > 0)
+    )
     return df
 
 
@@ -97,12 +104,21 @@ def build_daily_from_kartice(events: pd.DataFrame) -> pd.DataFrame:
             .sum()
         )
 
+        ps = (
+            group.loc[group["is_ps_receipt"]]
+            .groupby("Datum", as_index=True)
+            .agg(ps_prijem_qty=("Prijem_kolicina", "sum"), ps_prijem_value=("Prijem_vrednost", "sum"))
+        )
+
         for d in dates:
             gross = float(sales.get(d, 0.0))
             ret = float(returns.get(d, 0.0))
             net = gross - ret
             net_pos = max(0.0, net)
             stock = float(eod.loc[d]) if d in eod.index else 0.0
+            ps_qty = float(ps.loc[d, "ps_prijem_qty"]) if d in ps.index else 0.0
+            ps_val = float(ps.loc[d, "ps_prijem_value"]) if d in ps.index else 0.0
+            ps_unit = (ps_val / ps_qty) if ps_qty > 0 else math.nan
             rows.append(
                 {
                     "date": d.isoformat(),
@@ -113,6 +129,9 @@ def build_daily_from_kartice(events: pd.DataFrame) -> pd.DataFrame:
                     "return_qty": ret,
                     "net_sales_qty": net,
                     "net_sales_qty_pos": net_pos,
+                    "ps_prijem_qty": ps_qty,
+                    "ps_prijem_value": ps_val,
+                    "ps_unit_cost": ps_unit,
                 }
             )
 
@@ -120,6 +139,13 @@ def build_daily_from_kartice(events: pd.DataFrame) -> pd.DataFrame:
     if out.empty:
         return out
     out["date_dt"] = pd.to_datetime(out["date"], errors="coerce")
+    # Purchase cost is known only on PS receipt days; forward-fill per SKU.
+    if "ps_unit_cost" in out.columns:
+        out["ps_unit_cost"] = (
+            out.groupby("sku")["ps_unit_cost"]
+            .transform(lambda s: s.replace(0.0, math.nan).ffill())
+            .fillna(0.0)
+        )
     return out
 
 
@@ -544,6 +570,14 @@ def main() -> int:
 
     daily["lost_sales_value_est"] = daily["lost_sales_qty"] * pd.to_numeric(daily["sp_unit_net_price"], errors="coerce").fillna(0.0)
 
+    # Estimated lost purchase cost and gross profit loss (net), based on PS receipts from Kartice.
+    if "ps_unit_cost" not in daily.columns:
+        daily["ps_unit_cost"] = 0.0
+    unit_cost = pd.to_numeric(daily["ps_unit_cost"], errors="coerce").fillna(0.0)
+    unit_price = pd.to_numeric(daily["sp_unit_net_price"], errors="coerce").fillna(0.0)
+    daily["lost_purchase_cost_est"] = daily["lost_sales_qty"] * unit_cost
+    daily["lost_profit_est"] = daily["lost_sales_qty"] * (unit_price - unit_cost).clip(lower=0.0)
+
     promos = detect_promos(price_daily, cfg)
 
     out_daily = args.out / "sku_daily_metrics.csv"
@@ -559,6 +593,11 @@ def main() -> int:
         "demand_baseline_qty",
         "lost_sales_qty",
         "lost_sales_value_est",
+        "ps_prijem_qty",
+        "ps_prijem_value",
+        "ps_unit_cost",
+        "lost_purchase_cost_est",
+        "lost_profit_est",
         "sp_unit_net_price",
         "sp_discount_share",
         "sp_qty",

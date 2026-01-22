@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -144,6 +145,14 @@ def parse_kartica_pdf(pdf_path: Path) -> list[KarticaRow]:
     rows: list[KarticaRow] = []
     current_article = ""
     current_sku = ""
+    meta: dict[str, object] = {
+        "pdf_name": pdf_path.name,
+        "range_start": None,
+        "range_end": None,
+        "final_end": None,
+        "range_pages": 0,
+        "final_pages": 0,
+    }
 
     with pdfplumber.open(str(pdf_path)) as pdf:
         for page in pdf.pages:
@@ -151,6 +160,17 @@ def parse_kartica_pdf(pdf_path: Path) -> list[KarticaRow]:
             for raw in text.splitlines():
                 line = raw.strip()
                 if not line:
+                    continue
+
+                norm = _normalize(line).lower()
+                if norm.startswith("kartica zaliha"):
+                    dates = DATE_RE.findall(line)
+                    if len(dates) >= 2:
+                        meta["range_pages"] = int(meta.get("range_pages") or 0) + 1
+                        if meta.get("range_start") is None:
+                            meta["range_start"] = dates[0]
+                        if meta.get("range_end") is None:
+                            meta["range_end"] = dates[1]
                     continue
 
                 if line.startswith("ARTIKAL:"):
@@ -162,7 +182,6 @@ def parse_kartica_pdf(pdf_path: Path) -> list[KarticaRow]:
                     continue
 
                 # Initial balance line: "Početno stanje na dan 01.04.2024: 0 0,00 0,00"
-                norm = _normalize(line).lower()
                 if norm.startswith("pocetno stanje na dan"):
                     date_match = DATE_RE.search(line)
                     if not date_match:
@@ -191,6 +210,13 @@ def parse_kartica_pdf(pdf_path: Path) -> list[KarticaRow]:
                             stanje_vrednost=stanje_vrednost,
                         )
                     )
+                    continue
+
+                if norm.startswith("konacno stanje na dan"):
+                    date_match = DATE_RE.search(line)
+                    if date_match:
+                        meta["final_pages"] = int(meta.get("final_pages") or 0) + 1
+                        meta["final_end"] = date_match.group(1)
                     continue
 
                 doc_match = DOC_RE.match(line)
@@ -231,6 +257,9 @@ def parse_kartica_pdf(pdf_path: Path) -> list[KarticaRow]:
                     )
                 )
 
+    if meta.get("range_end") is None and meta.get("final_end") is not None:
+        meta["range_end"] = meta["final_end"]
+    setattr(parse_kartica_pdf, "_last_meta", meta)
     rows.sort(key=lambda r: (r.sku, r.date, r.doc))
     return rows
 
@@ -464,6 +493,40 @@ def _rewrite_zero_intervals_with_availability(
 
 def extract_kartica_events_and_summary(pdf_path: Path, output_dir: Path) -> tuple[Path, Path, Path]:
     parsed = parse_kartica_pdf(pdf_path)
+    meta = getattr(parse_kartica_pdf, "_last_meta", {}) or {}
+
+    def _to_iso(dmy: str | None) -> str | None:
+        if not dmy:
+            return None
+        try:
+            return datetime.strptime(str(dmy), "%d.%m.%Y").date().isoformat()
+        except Exception:
+            return None
+
+    meta_out = {
+        "pdf_name": meta.get("pdf_name") or pdf_path.name,
+        "range_start": meta.get("range_start"),
+        "range_end": meta.get("range_end"),
+        "final_end": meta.get("final_end"),
+        "range_start_iso": _to_iso(meta.get("range_start") if isinstance(meta, dict) else None),
+        "range_end_iso": _to_iso(meta.get("range_end") if isinstance(meta, dict) else None),
+        "final_end_iso": _to_iso(meta.get("final_end") if isinstance(meta, dict) else None),
+        "range_pages": meta.get("range_pages"),
+        "final_pages": meta.get("final_pages"),
+        "mismatch_final_vs_range_end": (
+            bool(meta.get("final_end") and meta.get("range_end") and meta.get("final_end") != meta.get("range_end"))
+            if isinstance(meta, dict)
+            else None
+        ),
+        "extracted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        (output_dir / "kartice_meta.json").write_text(
+            json.dumps(meta_out, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
     if not parsed:
         out_events = output_dir / "kartice_events.csv"
         out_summary = output_dir / "kartice_sku_summary.csv"
