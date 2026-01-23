@@ -2,6 +2,8 @@
 
 Ovaj fajl je kratki podsjetnik za sljedeće Codex sesije: gdje je šta u aplikaciji, šta je “izvor istine”, kako se regenerišu metrike i koje fajlove gledati.
 
+> Napomena: ovaj repo/branch je **SRB1.2** (glavni fajl `SRB1.2-razvoj.py`, DB default `SRB1.2.db`).
+
 ## Da li je pametno?
 Da — ovo štedi vrijeme i smanjuje šansu da ponovo napravimo iste greške (npr. `POCETNO` datum u karticama, pogrešno računanje popusta, pogrešan izvor cijene).
 
@@ -17,11 +19,73 @@ Da — ovo štedi vrijeme i smanjuje šansu da ponovo napravimo iste greške (np
 - **Banka XML**: istina za refund isplate (tab Povrati zadržan).
 
 ## Jedna baza
-- Trenutno cilj: **sve u `SRB1.1-razvoj.db`**.
-- `build_sku_daily_metrics.py` i UI “Regenerisi metrike” sada koriste `state["db_path"]` (tj. `SRB1.1-razvoj.db`) kao DB za SP cijene.
+- Trenutno cilj: **sve u `SRB1.2.db`** (ili DB koji izabereš u UI).
+- `build_sku_daily_metrics.py` i UI “Regenerisi metrike” koriste `state["db_path"]` kao DB za SP cijene.
 
 
 ---
+
+# ✅ Accounting / finansijska pravila (dogovor)
+
+Ovo su definicije da aplikacija bude i “knjigovodstveno” konzistentna, ne samo tehnički.
+
+## 1) Bruto prihod (SP cash) — “prihod po kreiranju”
+- **Šta je**: bruto prihod od prodaje iz SP Narudžbi (maloprodajne cijene sa popustima), tretiran kao promet za mjesec/dan kada je narudžba kreirana.
+- **Datum**: `orders.created_at` (SP datum kreiranja narudžbe).
+- **Formula (po stavkama)**:
+  - `cash_sp = qty*cod_amount*(1-extra_discount%)*(1-discount%) + qty*addon_cod*(1-extra_discount%)`
+  - `advance_amount` / `addon_advance` se **ne dodaje** u prihod (kod nas je avans ≈ zamjena nakon COD; prihod je već knjižen ranije).
+- **Statusi**: `Vraćeno/Vraceno` se **ne računa u prihod** (to ide u `Nepreuzete` tab).
+
+## 2) Neuplaćeno od SP (dug) — all-time
+- **Šta je**: dug od SP za pošiljke koje su **Isporučeno** i nemaju uplatu u `payments`.
+- **All-time**: lista i suma su uvijek all-time (nije vezano za period u Finansije).
+
+## 3) Na čekanju (poslato/u obradi) — all-time
+- **Šta je**: očekivana uplata u budućnosti za `Poslato` / `U obradi` pošiljke koje još nisu isporučene i nemaju uplatu.
+- **All-time**: lista i suma su uvijek all-time.
+
+## Lozinka (reset + Finansije) — gdje je i šta ako se zaboravi
+- **Finansije tab** je zaključan lozinkom koja je **ista kao lozinka za Reset (izvor)**.
+- **Gdje se čuva**: u SQLite bazi u tabeli `app_state` pod ključem `reset_password_hash` (SHA-256 hash; originalna lozinka se ne može “izvući”).
+- **Baseline lock**: `baseline_locked` i `baseline_locked_at` su takođe u `app_state`.
+
+### Ako zaboraviš lozinku
+- Ne može se “extractovati” iz baze/koda (hash se ne može vratiti u original).
+- Možeš je **resetovati** direktno u bazi (ako imaš fizički pristup `.db` fajlu). Preporuka: uvijek prvo backup baze.
+
+### Reset lozinke direktno u bazi (PowerShell)
+`@'
+import sqlite3, hashlib
+
+db = "SRB1.2.db"  # ili putanja do DB
+new_password = "NOVA_LOZINKA"
+
+c = sqlite3.connect(db)
+c.execute(
+  "INSERT INTO app_state(key, value) VALUES(?, ?) "
+  "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+  ("reset_password_hash", hashlib.sha256(new_password.encode("utf-8")).hexdigest()),
+)
+c.commit()
+c.close()
+print("OK: reset_password_hash updated")
+'@ | python -`
+
+### Ukloni lozinku (ne preporučeno)
+`@'
+import sqlite3
+c = sqlite3.connect("SRB1.2.db")
+c.execute("DELETE FROM app_state WHERE key='reset_password_hash'")
+c.commit()
+c.close()
+print("OK: reset_password_hash removed")
+'@ | python -`
+
+## 4) Troškovi i Neto (profit)
+- **Troškovi**: iz `Banka XML` (benefit=debit) po logici već definisanoj u app-u (npr. ne računa kupoprodaju deviza).
+- **Povrati kupcima (banka)**: istina je banka; u neto su već “u troškovima” (debit), ali ih prikazujemo odvojeno radi transparentnosti.
+- **Neto (profit)**: `Bruto prihod (SP cash) - Troškovi (banka)` za isti period.
 
 # ✅ Codex pravila ponašanja (OBAVEZNO)
 

@@ -11,16 +11,53 @@ def build_finansije_tab(
     *,
     ctk: Any,
     tab_finansije: Any,
+    Figure: Any,
+    FigureCanvasTkAgg: Any,
     messagebox: Any,
+    unlock_finansije: Callable[[], bool],
     pick_date_range_dialog: Callable[
         [str, date | None, date | None], tuple[date | None, date | None]
     ],
     format_user_date: Callable[[date], str],
     refresh_finansije: Callable[[], None],
     export_unpaid_sp_orders: Callable[[], None],
+    export_pending_sp_orders: Callable[[], None],
+    export_neto_breakdown: Callable[[], None],
 ) -> dict[str, Any]:
     frame = ctk.CTkFrame(tab_finansije)
     frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+    lock_overlay = ctk.CTkFrame(frame)
+    lock_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+    ctk.CTkLabel(
+        lock_overlay,
+        text="Finansije su zaključane.\nOtključaj lozinkom (ista kao za Reset podataka).",
+        justify="center",
+        font=ctk.CTkFont(size=18, weight="bold"),
+    ).pack(pady=(40, 12))
+
+    def _try_unlock():
+        ok = False
+        try:
+            ok = bool(unlock_finansije())
+        except Exception:
+            ok = False
+        if ok:
+            try:
+                lock_overlay.place_forget()
+            except Exception:
+                pass
+            refresh_finansije()
+        else:
+            messagebox.showerror("Greska", "Finansije ostaju zaključane.")
+
+    ctk.CTkButton(lock_overlay, text="Otključaj Finansije", command=_try_unlock).pack(
+        pady=(0, 20)
+    )
+    try:
+        lock_overlay.lift()
+    except Exception:
+        pass
 
     controls = ctk.CTkFrame(frame)
     controls.pack(fill="x", padx=6, pady=(6, 6))
@@ -82,13 +119,21 @@ def build_finansije_tab(
 
     row = ctk.CTkFrame(kpi, fg_color="transparent")
     row.pack(fill="x", padx=10, pady=(10, 4))
-    ctk.CTkLabel(row, text="Neto prihod (period)").pack(side="left")
+    ctk.CTkLabel(row, text="Bruto prihod (SP cash, period)").pack(side="left")
     lbl_net_revenue = ctk.CTkLabel(row, text="0", font=ctk.CTkFont(size=22, weight="bold"))
     lbl_net_revenue.pack(side="left", padx=12)
+    ctk.CTkButton(row, text="Export cash breakdown", command=export_neto_breakdown).pack(
+        side="left", padx=12
+    )
+
+    ctk.CTkLabel(
+        kpi,
+        text="Bruto prihod (SP cash) = COD (+dodatno) poslije popusta; 'Vraćeno/Vraceno' se ne računa.",
+    ).pack(anchor="w", padx=10, pady=(0, 6))
 
     row2 = ctk.CTkFrame(kpi, fg_color="transparent")
     row2.pack(fill="x", padx=10, pady=(0, 10))
-    ctk.CTkLabel(row2, text="Neto prihod (poređenje)").pack(side="left")
+    ctk.CTkLabel(row2, text="Bruto prihod (SP cash, poređenje)").pack(side="left")
     lbl_net_revenue_cmp = ctk.CTkLabel(
         row2, text="-", font=ctk.CTkFont(size=18, weight="bold")
     )
@@ -96,9 +141,36 @@ def build_finansije_tab(
     lbl_net_revenue_delta = ctk.CTkLabel(row2, text="", font=ctk.CTkFont(size=16))
     lbl_net_revenue_delta.pack(side="left", padx=12)
 
+    row3 = ctk.CTkFrame(kpi, fg_color="transparent")
+    row3.pack(fill="x", padx=10, pady=(0, 10))
+    expenses_var = ctk.StringVar(value="0")
+    refunds_var = ctk.StringVar(value="0")
+    ctk.CTkLabel(row3, text="Troškovi (banka):").pack(side="left")
+    ctk.CTkLabel(row3, textvariable=expenses_var, font=ctk.CTkFont(size=16)).pack(
+        side="left", padx=8
+    )
+    ctk.CTkLabel(row3, text="Povrati (banka):").pack(side="left", padx=(16, 0))
+    ctk.CTkLabel(row3, textvariable=refunds_var, font=ctk.CTkFont(size=16)).pack(
+        side="left", padx=8
+    )
+
+    row4 = ctk.CTkFrame(kpi, fg_color="transparent")
+    row4.pack(fill="x", padx=10, pady=(0, 10))
+    ctk.CTkLabel(row4, text="Neto (Bruto cash - Troškovi):").pack(side="left")
+    lbl_net_profit = ctk.CTkLabel(
+        row4, text="0", font=ctk.CTkFont(size=20, weight="bold")
+    )
+    lbl_net_profit.pack(side="left", padx=12)
+    lbl_net_profit_cmp = ctk.CTkLabel(
+        row4, text="-", font=ctk.CTkFont(size=16, weight="bold")
+    )
+    lbl_net_profit_cmp.pack(side="left", padx=(24, 12))
+    lbl_net_profit_delta = ctk.CTkLabel(row4, text="", font=ctk.CTkFont(size=16))
+    lbl_net_profit_delta.pack(side="left", padx=12)
+
     unpaid = ctk.CTkFrame(frame)
     unpaid.pack(fill="x", padx=6, pady=(0, 6))
-    ctk.CTkLabel(unpaid, text="Neuplaćeno od SP (isporučeno, bez SP uplate)").pack(
+    ctk.CTkLabel(unpaid, text="Neuplaćeno od SP (all-time, isporučeno, bez SP uplate)").pack(
         anchor="w", padx=10, pady=(10, 2)
     )
     unpaid_row = ctk.CTkFrame(unpaid, fg_color="transparent")
@@ -113,6 +185,37 @@ def build_finansije_tab(
         command=export_unpaid_sp_orders,
     ).pack(side="left", padx=12)
 
+    pending = ctk.CTkFrame(frame)
+    pending.pack(fill="x", padx=6, pady=(0, 6))
+    ctk.CTkLabel(
+        pending, text="Na čekanju (all-time, poslato/u obradi, bez SP uplate)"
+    ).pack(anchor="w", padx=10, pady=(10, 2))
+    pending_row = ctk.CTkFrame(pending, fg_color="transparent")
+    pending_row.pack(fill="x", padx=10, pady=(0, 10))
+    pending_var = ctk.StringVar(value="0")
+    ctk.CTkLabel(
+        pending_row,
+        textvariable=pending_var,
+        font=ctk.CTkFont(size=20, weight="bold"),
+    ).pack(side="left")
+    ctk.CTkButton(
+        pending_row,
+        text="Export detaljno",
+        command=export_pending_sp_orders,
+    ).pack(side="left", padx=12)
+
+    charts = ctk.CTkFrame(frame)
+    charts.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+    ctk.CTkLabel(charts, text="Grafika (po mjesecu): Prihodi / Rashodi / Neto").pack(
+        anchor="w", padx=10, pady=(10, 4)
+    )
+    fig_monthly = Figure(figsize=(8, 3), dpi=100)
+    ax_monthly = fig_monthly.add_subplot(111)
+    canvas_monthly = FigureCanvasTkAgg(fig_monthly, master=charts)
+    canvas_monthly.get_tk_widget().pack(
+        side="top", fill="both", expand=True, padx=6, pady=(0, 6)
+    )
+
     def show_help():
         messagebox.showinfo(
             "Info",
@@ -124,11 +227,25 @@ def build_finansije_tab(
         anchor="w", padx=6, pady=(8, 0)
     )
 
+    try:
+        lock_overlay.lift()
+    except Exception:
+        pass
+
     return {
+        "lock_overlay": lock_overlay,
         "lbl_net_revenue": lbl_net_revenue,
         "lbl_net_revenue_cmp": lbl_net_revenue_cmp,
         "lbl_net_revenue_delta": lbl_net_revenue_delta,
+        "lbl_net_profit": lbl_net_profit,
+        "lbl_net_profit_cmp": lbl_net_profit_cmp,
+        "lbl_net_profit_delta": lbl_net_profit_delta,
+        "expenses_var": expenses_var,
+        "refunds_var": refunds_var,
         "unpaid_var": unpaid_var,
+        "pending_var": pending_var,
         "period_label_var": period_label_var,
         "compare_label_var": compare_label_var,
+        "ax_monthly": ax_monthly,
+        "canvas_monthly": canvas_monthly,
     }

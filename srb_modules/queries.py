@@ -49,7 +49,7 @@ def get_top_customers(
     start: str | None = None,
     end: str | None = None,
 ):
-    date_clause, params = date_filter_clause("o.picked_up_at", days, start, end)
+    date_clause, params = date_filter_clause("o.created_at", days, start, end)
     rows = conn.execute(
         "SELECT COALESCE(NULLIF(TRIM(MAX(o.customer_name)), ''), o.customer_key) AS display_name, "
         "COUNT(DISTINCT o.id) AS orders_cnt, "
@@ -59,13 +59,11 @@ def get_top_customers(
         "* (1 - COALESCE(oi.discount, 0) / 100.0) "
         "+ COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
         "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.advance_amount, 0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.addon_advance, 0)"
         ") AS net_total "
         "FROM orders o "
         "LEFT JOIN order_items oi ON oi.order_id = o.id "
         "WHERE o.customer_key IS NOT NULL AND o.customer_key != '' "
-        "AND o.picked_up_at IS NOT NULL "
+        "AND o.created_at IS NOT NULL "
         "AND (o.status IS NULL OR (o.status NOT LIKE '%Vra\u0107eno%' AND o.status NOT LIKE '%Vraceno%')) "
         + date_clause
         + " GROUP BY o.customer_key "
@@ -83,7 +81,7 @@ def get_top_products(
     start: str | None = None,
     end: str | None = None,
 ):
-    date_clause, params = date_filter_clause("o.picked_up_at", days, start, end)
+    date_clause, params = date_filter_clause("o.created_at", days, start, end)
     rows = conn.execute(
         "SELECT oi.product_code, "
         "SUM(COALESCE(oi.qty, 0)) AS total_qty, "
@@ -93,13 +91,11 @@ def get_top_products(
         "* (1 - COALESCE(oi.discount, 0) / 100.0) "
         "+ COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
         "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.advance_amount, 0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.addon_advance, 0)"
         ") AS net_total "
         "FROM order_items oi "
         "JOIN orders o ON o.id = oi.order_id "
         "WHERE oi.product_code IS NOT NULL AND oi.product_code != '' "
-        "AND o.picked_up_at IS NOT NULL "
+        "AND o.created_at IS NOT NULL "
         "AND (o.status IS NULL OR (o.status NOT LIKE '%Vra\u0107eno%' AND o.status NOT LIKE '%Vraceno%')) "
         + date_clause
         + " GROUP BY oi.product_code "
@@ -116,10 +112,10 @@ def get_kpis(
     start: str | None = None,
     end: str | None = None,
 ):
-    date_clause, params = date_filter_clause("o.picked_up_at", days, start, end)
+    date_clause, params = date_filter_clause("o.created_at", days, start, end)
     total_orders = conn.execute(
         "SELECT COUNT(*) FROM orders o "
-        "WHERE o.picked_up_at IS NOT NULL "
+        "WHERE o.created_at IS NOT NULL "
         "AND (o.status IS NULL OR (o.status NOT LIKE '%Vra\u0107eno%' AND o.status NOT LIKE '%Vraceno%')) "
         + date_clause,
         params,
@@ -131,12 +127,10 @@ def get_kpis(
         "* (1 - COALESCE(oi.discount, 0) / 100.0) "
         "+ COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
         "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.advance_amount, 0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.addon_advance, 0)"
         ") "
         "FROM orders o "
         "JOIN order_items oi ON oi.order_id = o.id "
-        "WHERE o.picked_up_at IS NOT NULL "
+        "WHERE o.created_at IS NOT NULL "
         "AND (o.status IS NULL OR (o.status NOT LIKE '%Vra\u0107eno%' AND o.status NOT LIKE '%Vraceno%')) "
         + date_clause,
         params,
@@ -203,6 +197,58 @@ def get_sp_bank_monthly(
         params,
     ).fetchall()
     return rows
+
+
+def get_finansije_monthly(
+    conn: sqlite3.Connection,
+    days: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> list[tuple[str, float, float, float]]:
+    """
+    Returns rows: (period_yyyy_mm, bruto_cash, troskovi, neto)
+    - bruto_cash: SP COD (+dodatno) poslije popusta, po orders.created_at, bez Vraćeno/Vraceno
+    - troskovi: bank debit totals (existing filters), po dtposted
+    """
+    order_date_clause, order_params = date_filter_clause("o.created_at", days, start, end)
+    order_expr = date_expr("o.created_at")
+    bruto_rows = conn.execute(
+        "SELECT substr(" + order_expr + ", 1, 7) AS period, "
+        "SUM("
+        "COALESCE(oi.qty, 0) * COALESCE(oi.cod_amount, 0) "
+        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
+        "* (1 - COALESCE(oi.discount, 0) / 100.0) "
+        "+ COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
+        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
+        ") AS bruto_cash "
+        "FROM orders o "
+        "JOIN order_items oi ON oi.order_id = o.id "
+        "WHERE o.created_at IS NOT NULL "
+        "AND (o.status IS NULL OR (o.status NOT LIKE '%Vra\u0107eno%' AND o.status NOT LIKE '%Vraceno%')) "
+        + order_date_clause
+        + " GROUP BY period "
+        "ORDER BY period",
+        order_params,
+    ).fetchall()
+
+    bank_rows = get_sp_bank_monthly(conn, days, start, end)
+
+    by_period: dict[str, dict[str, float]] = {}
+    for period, bruto_cash in bruto_rows:
+        if not period:
+            continue
+        by_period.setdefault(period, {})["bruto_cash"] = float(bruto_cash or 0.0)
+    for period, _, expense in bank_rows:
+        if not period:
+            continue
+        by_period.setdefault(period, {})["troskovi"] = float(expense or 0.0)
+
+    out: list[tuple[str, float, float, float]] = []
+    for period in sorted(by_period.keys()):
+        bruto_cash = float(by_period.get(period, {}).get("bruto_cash", 0.0))
+        troskovi = float(by_period.get(period, {}).get("troskovi", 0.0))
+        out.append((period, bruto_cash, troskovi, bruto_cash - troskovi))
+    return out
 
 
 def _normalize_expense_key(text: str) -> str:
@@ -769,6 +815,22 @@ def get_refund_rows(
     return rows
 
 
+def get_refund_total_amount(
+    conn: sqlite3.Connection,
+    days: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> float:
+    rows = get_refund_rows(conn, days, start, end)
+    total = 0.0
+    for _txn_id, _dtposted, amount, _payee_name, _purpose, *_rest in rows:
+        try:
+            total += float(amount or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return float(total or 0.0)
+
+
 def build_refund_item_totals(
     conn: sqlite3.Connection,
     days: int | None = None,
@@ -857,27 +919,35 @@ def get_unpaid_sp_orders_summary(
         where_period += f" AND {delivered_expr} <= date(?)"
         params.append(end_date)
     row = conn.execute(
-        "SELECT "
-        "COUNT(DISTINCT o.id) AS orders_cnt, "
-        "COALESCE(SUM("
-        "COALESCE(oi.qty, 0) * COALESCE(oi.cod_amount, 0) "
-        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
-        "* (1 - COALESCE(oi.discount, 0) / 100.0) "
-        "+ COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
-        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.advance_amount, 0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.addon_advance, 0)"
-        "), 0.0) AS net_sum "
-        "FROM orders o "
-        "LEFT JOIN order_items oi ON oi.order_id = o.id "
-        "LEFT JOIN payments p ON p.sp_order_no = o.sp_order_no "
-        "WHERE o.delivered_at IS NOT NULL AND TRIM(o.delivered_at) != '' "
-        "AND p.id IS NULL "
-        "AND (o.status IS NULL OR (lower(o.status) NOT LIKE '%otkazan%' "
-        "AND lower(o.status) NOT LIKE '%obradi%' "
-        "AND lower(o.status) NOT LIKE '%vraceno%' "
-        "AND lower(o.status) NOT LIKE '%vra\u0107eno%')) "
-        + where_period,
+        "SELECT COUNT(*) AS orders_cnt, COALESCE(SUM(sp_expected_amount), 0.0) AS sp_sum "
+        "FROM ("
+        "  SELECT o.id AS order_id, "
+        "  ("
+        "    SUM("
+        "      COALESCE(oi.qty, 0) * COALESCE(oi.cod_amount, 0) "
+        "      * (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
+        "      * (1 - COALESCE(oi.discount, 0) / 100.0)"
+        "    )"
+        "    + SUM("
+        "      COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
+        "      * (1 - COALESCE(oi.extra_discount, 0) / 100.0)"
+        "    )"
+        "  ) AS sp_expected_amount "
+        "  FROM orders o "
+        "  LEFT JOIN order_items oi ON oi.order_id = o.id "
+        "  LEFT JOIN payments p ON p.sp_order_no = o.sp_order_no "
+        "  WHERE o.delivered_at IS NOT NULL AND TRIM(o.delivered_at) != '' "
+        "  AND o.status IS NOT NULL "
+        "  AND (o.status LIKE '%Isporu%' OR o.status LIKE '%isporu%') "
+        "  AND p.id IS NULL "
+        "  AND (o.status IS NULL OR (lower(o.status) NOT LIKE '%otkazan%' "
+        "    AND lower(o.status) NOT LIKE '%obradi%' "
+        "    AND lower(o.status) NOT LIKE '%vraceno%' "
+        "    AND lower(o.status) NOT LIKE '%vra\u0107eno%')) "
+        + where_period
+        + "  GROUP BY o.id "
+        "  HAVING sp_expected_amount > 0"
+        ") t",
         params,
     ).fetchone()
     if not row:
@@ -903,19 +973,23 @@ def get_unpaid_sp_orders_details(
         "SELECT "
         "o.sp_order_no, o.customer_name, o.city, o.tracking_code, "
         "o.created_at, o.picked_up_at, o.delivered_at, o.status, "
+        "("
         "SUM("
         "COALESCE(oi.qty, 0) * COALESCE(oi.cod_amount, 0) "
         "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
-        "* (1 - COALESCE(oi.discount, 0) / 100.0) "
-        "+ COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
-        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.advance_amount, 0) "
-        "- COALESCE(oi.qty, 0) * COALESCE(oi.addon_advance, 0)"
-        ") AS net_sum "
+        "* (1 - COALESCE(oi.discount, 0) / 100.0)"
+        ") + SUM("
+        "COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
+        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0)"
+        ")) AS sp_expected_amount, "
+        "SUM(COALESCE(oi.qty, 0) * COALESCE(oi.advance_amount, 0)) "
+        "+ SUM(COALESCE(oi.qty, 0) * COALESCE(oi.addon_advance, 0)) AS advance_total "
         "FROM orders o "
         "LEFT JOIN order_items oi ON oi.order_id = o.id "
         "LEFT JOIN payments p ON p.sp_order_no = o.sp_order_no "
         "WHERE o.delivered_at IS NOT NULL AND TRIM(o.delivered_at) != '' "
+        "AND o.status IS NOT NULL "
+        "AND (o.status LIKE '%Isporu%' OR o.status LIKE '%isporu%') "
         "AND p.id IS NULL "
         "AND (o.status IS NULL OR (lower(o.status) NOT LIKE '%otkazan%' "
         "AND lower(o.status) NOT LIKE '%obradi%' "
@@ -923,6 +997,7 @@ def get_unpaid_sp_orders_details(
         "AND lower(o.status) NOT LIKE '%vra\u0107eno%')) "
         + where_period
         + " GROUP BY o.id "
+        "HAVING sp_expected_amount > 0 "
         "ORDER BY o.delivered_at DESC",
         params,
     ).fetchall()
@@ -935,9 +1010,182 @@ def get_unpaid_sp_orders_details(
         "picked_up_at",
         "delivered_at",
         "status",
-        "net_amount_expected",
+        "sp_expected_amount",
+        "advance_total",
     ]
     return cols, rows
+
+
+def get_pending_sp_orders_summary(conn: sqlite3.Connection) -> tuple[int, float]:
+    row = conn.execute(
+        "SELECT COUNT(*) AS orders_cnt, COALESCE(SUM(sp_expected_amount), 0.0) AS sp_sum "
+        "FROM ("
+        "  SELECT o.id AS order_id, "
+        "  ("
+        "    SUM("
+        "      COALESCE(oi.qty, 0) * COALESCE(oi.cod_amount, 0) "
+        "      * (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
+        "      * (1 - COALESCE(oi.discount, 0) / 100.0)"
+        "    )"
+        "    + SUM("
+        "      COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
+        "      * (1 - COALESCE(oi.extra_discount, 0) / 100.0)"
+        "    )"
+        "  ) AS sp_expected_amount "
+        "  FROM orders o "
+        "  LEFT JOIN order_items oi ON oi.order_id = o.id "
+        "  LEFT JOIN payments p ON trim(p.sp_order_no) = trim(o.sp_order_no) "
+        "  WHERE (o.delivered_at IS NULL OR TRIM(o.delivered_at) = '') "
+        "  AND o.status IS NOT NULL "
+        "  AND (lower(o.status) LIKE '%poslat%' OR lower(o.status) LIKE '%obradi%') "
+        "  AND p.id IS NULL "
+        "  AND (lower(o.status) NOT LIKE '%otkazan%' "
+        "    AND lower(o.status) NOT LIKE '%vraceno%' "
+        "    AND lower(o.status) NOT LIKE '%vra\u0107eno%') "
+        "  GROUP BY o.id "
+        "  HAVING sp_expected_amount > 0"
+        ") t"
+    ).fetchone()
+    if not row:
+        return (0, 0.0)
+    return (int(row[0] or 0), float(row[1] or 0.0))
+
+
+def get_pending_sp_orders_details(conn: sqlite3.Connection) -> tuple[list[str], list[tuple]]:
+    rows = conn.execute(
+        "SELECT "
+        "o.sp_order_no, o.customer_name, o.city, o.tracking_code, "
+        "o.created_at, o.picked_up_at, o.delivered_at, o.status, "
+        "("
+        "SUM("
+        "COALESCE(oi.qty, 0) * COALESCE(oi.cod_amount, 0) "
+        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
+        "* (1 - COALESCE(oi.discount, 0) / 100.0)"
+        ") + SUM("
+        "COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
+        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0)"
+        ")) AS sp_expected_amount "
+        "FROM orders o "
+        "LEFT JOIN order_items oi ON oi.order_id = o.id "
+        "LEFT JOIN payments p ON trim(p.sp_order_no) = trim(o.sp_order_no) "
+        "WHERE (o.delivered_at IS NULL OR TRIM(o.delivered_at) = '') "
+        "AND o.status IS NOT NULL "
+        "AND (lower(o.status) LIKE '%poslat%' OR lower(o.status) LIKE '%obradi%') "
+        "AND p.id IS NULL "
+        "AND (lower(o.status) NOT LIKE '%otkazan%' "
+        "AND lower(o.status) NOT LIKE '%vraceno%' "
+        "AND lower(o.status) NOT LIKE '%vra\u0107eno%') "
+        "GROUP BY o.id "
+        "HAVING sp_expected_amount > 0 "
+        "ORDER BY o.created_at DESC"
+    ).fetchall()
+    cols = [
+        "sp_order_no",
+        "customer_name",
+        "city",
+        "tracking_code",
+        "created_at",
+        "picked_up_at",
+        "delivered_at",
+        "status",
+        "sp_expected_amount",
+    ]
+    return cols, rows
+
+
+def get_neto_breakdown_by_orders(
+    conn: sqlite3.Connection,
+    days: int | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> tuple[list[str], list[tuple]]:
+    date_clause, params = date_filter_clause("o.created_at", days, start, end)
+    rows = conn.execute(
+        "SELECT "
+        "o.sp_order_no, o.customer_name, o.city, o.status, "
+        "o.created_at, o.picked_up_at, o.delivered_at, "
+        "SUM(COALESCE(oi.qty, 0) * COALESCE(oi.cod_amount, 0)) AS gross_cod_raw, "
+        "SUM(COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0)) AS gross_addon_raw, "
+        "SUM("
+        "COALESCE(oi.qty, 0) * COALESCE(oi.cod_amount, 0) "
+        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0) "
+        "* (1 - COALESCE(oi.discount, 0) / 100.0)"
+        ") AS cod_after_discounts, "
+        "SUM("
+        "COALESCE(oi.qty, 0) * COALESCE(oi.addon_cod, 0) "
+        "* (1 - COALESCE(oi.extra_discount, 0) / 100.0)"
+        ") AS addon_after_discounts, "
+        "SUM(COALESCE(oi.qty, 0) * COALESCE(oi.advance_amount, 0)) AS advance_raw, "
+        "SUM(COALESCE(oi.qty, 0) * COALESCE(oi.addon_advance, 0)) AS advance_addon_raw "
+        "FROM orders o "
+        "LEFT JOIN order_items oi ON oi.order_id = o.id "
+        "WHERE o.created_at IS NOT NULL "
+        + date_clause
+        + " GROUP BY o.id "
+        "ORDER BY o.created_at DESC",
+        params,
+    ).fetchall()
+    out_rows = []
+    for r in rows:
+        (
+            sp_order_no,
+            customer_name,
+            city,
+            status,
+            created_at,
+            picked_up_at,
+            delivered_at,
+            gross_cod_raw,
+            gross_addon_raw,
+            cod_after_discounts,
+            addon_after_discounts,
+            advance_raw,
+            advance_addon_raw,
+        ) = r
+        gross_raw = float(gross_cod_raw or 0.0) + float(gross_addon_raw or 0.0)
+        gross_after = float(cod_after_discounts or 0.0) + float(
+            addon_after_discounts or 0.0
+        )
+        advance_total = float(advance_raw or 0.0) + float(advance_addon_raw or 0.0)
+        cash_sp = gross_after
+        shipment_value = gross_after + advance_total
+        included = 1
+        st = str(status or "")
+        if "Vra\u0107eno" in st or "Vraceno" in st:
+            included = 0
+        out_rows.append(
+            (
+                sp_order_no,
+                customer_name,
+                city,
+                status,
+                created_at,
+                picked_up_at,
+                delivered_at,
+                gross_raw,
+                gross_after,
+                advance_total,
+                cash_sp,
+                shipment_value,
+                included,
+            )
+        )
+    cols = [
+        "sp_order_no",
+        "customer_name",
+        "city",
+        "status",
+        "created_at",
+        "picked_up_at",
+        "delivered_at",
+        "gross_raw",
+        "cash_sp_after_discounts",
+        "advance_total",
+        "shipment_value_calc",
+        "cash_sp_calc",
+        "included_in_kpis",
+    ]
+    return cols, out_rows
 
 
 def report_refund_items_category(

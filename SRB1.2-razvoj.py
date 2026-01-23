@@ -771,8 +771,13 @@ from srb_modules.queries import (
     build_refund_item_totals,
     date_filter_clause,
     get_expense_summary,
+    get_finansije_monthly,
     get_kpis,
+    get_neto_breakdown_by_orders,
     get_needs_invoice_orders,
+    get_pending_sp_orders_details,
+    get_pending_sp_orders_summary,
+    get_refund_total_amount,
     get_refund_top_categories,
     get_refund_top_customers,
     get_refund_top_items,
@@ -3810,7 +3815,7 @@ def run_ui(db_path: Path) -> None:
     import threading
     import tkinter as tk
     import time
-    from tkinter import filedialog, messagebox
+    from tkinter import filedialog, messagebox, simpledialog
     from tkcalendar import Calendar
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
@@ -4246,10 +4251,34 @@ def run_ui(db_path: Path) -> None:
 
     def refresh_finansije():
         widgets = ctx.state.get("finansije_widgets") or {}
+        lock_overlay = widgets.get("lock_overlay")
+        if not ctx.state.get("finansije_unlocked", False):
+            if lock_overlay is not None:
+                try:
+                    lock_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+                    lock_overlay.lift()
+                except Exception:
+                    pass
+            return
+
+        if lock_overlay is not None:
+            try:
+                lock_overlay.place_forget()
+            except Exception:
+                pass
+
         lbl_main = widgets.get("lbl_net_revenue")
         lbl_cmp = widgets.get("lbl_net_revenue_cmp")
         lbl_delta = widgets.get("lbl_net_revenue_delta")
+        lbl_net = widgets.get("lbl_net_profit")
+        lbl_net_cmp = widgets.get("lbl_net_profit_cmp")
+        lbl_net_delta = widgets.get("lbl_net_profit_delta")
+        expenses_var = widgets.get("expenses_var")
+        refunds_var = widgets.get("refunds_var")
         unpaid_var = widgets.get("unpaid_var")
+        pending_var = widgets.get("pending_var")
+        ax_monthly = widgets.get("ax_monthly")
+        canvas_monthly = widgets.get("canvas_monthly")
         period_label_var = widgets.get("period_label_var")
         if lbl_main is None or unpaid_var is None:
             return
@@ -4285,7 +4314,21 @@ def run_ui(db_path: Path) -> None:
         conn = get_conn()
         try:
             k_main = get_kpis(conn, main_days, main_start_str, main_end_str)
-            lbl_main.configure(text=format_amount(k_main.get("total_revenue", 0.0)))
+            gross_cash = float(k_main.get("total_revenue", 0.0) or 0.0)
+            lbl_main.configure(text=format_amount(gross_cash))
+
+            exp = get_expense_summary(conn, main_days, main_start_str, main_end_str)
+            expenses_total = float(exp.get("total", 0.0) or 0.0)
+            refunds_total = float(
+                get_refund_total_amount(conn, main_days, main_start_str, main_end_str)
+            )
+            if expenses_var is not None:
+                expenses_var.set(format_amount(-expenses_total))
+            if refunds_var is not None:
+                refunds_var.set(format_amount(-refunds_total))
+            net_profit = gross_cash - expenses_total
+            if lbl_net is not None:
+                lbl_net.configure(text=format_amount(net_profit))
 
             cmp_custom = bool(ctx.state.get("fin_compare_custom"))
             cmp_start = ctx.state.get("fin_compare_start")
@@ -4296,7 +4339,7 @@ def run_ui(db_path: Path) -> None:
                 )
                 k_cmp = get_kpis(conn, None, cmp_start_str, cmp_end_str)
                 cmp_val = float(k_cmp.get("total_revenue", 0.0) or 0.0)
-                main_val = float(k_main.get("total_revenue", 0.0) or 0.0)
+                main_val = gross_cash
                 if lbl_cmp is not None:
                     lbl_cmp.configure(text=format_amount(cmp_val))
                 if lbl_delta is not None:
@@ -4304,16 +4347,95 @@ def run_ui(db_path: Path) -> None:
                     pct = (diff / cmp_val * 100.0) if cmp_val else None
                     pct_txt = f" ({pct:+.1f}%)" if pct is not None else ""
                     lbl_delta.configure(text=f"Δ {format_amount(diff)}{pct_txt}")
+
+                cmp_exp = get_expense_summary(conn, None, cmp_start_str, cmp_end_str)
+                cmp_exp_total = float(cmp_exp.get("total", 0.0) or 0.0)
+                cmp_net = cmp_val - cmp_exp_total
+                if lbl_net_cmp is not None:
+                    lbl_net_cmp.configure(text=format_amount(cmp_net))
+                if lbl_net_delta is not None:
+                    diff_net = net_profit - cmp_net
+                    pct_net = (diff_net / cmp_net * 100.0) if cmp_net else None
+                    pct_net_txt = f" ({pct_net:+.1f}%)" if pct_net is not None else ""
+                    lbl_net_delta.configure(text=f"Δ {format_amount(diff_net)}{pct_net_txt}")
             else:
                 if lbl_cmp is not None:
                     lbl_cmp.configure(text="-")
                 if lbl_delta is not None:
                     lbl_delta.configure(text="")
+                if lbl_net_cmp is not None:
+                    lbl_net_cmp.configure(text="-")
+                if lbl_net_delta is not None:
+                    lbl_net_delta.configure(text="")
 
-            unpaid_cnt, unpaid_sum = get_unpaid_sp_orders_summary(
-                conn, main_start_str, main_end_str
-            )
+            unpaid_cnt, unpaid_sum = get_unpaid_sp_orders_summary(conn, None, None)
             unpaid_var.set(f"{unpaid_cnt} | {format_amount(unpaid_sum)}")
+            if pending_var is not None:
+                pending_cnt, pending_sum = get_pending_sp_orders_summary(conn)
+                pending_var.set(f"{pending_cnt} | {format_amount(pending_sum)}")
+
+            if ax_monthly is not None and canvas_monthly is not None:
+                monthly = get_finansije_monthly(conn, main_days, main_start_str, main_end_str)
+                ax_monthly.clear()
+                if not monthly:
+                    ax_monthly.set_title("Razlika Prihodi/Rashodi (nema podataka)")
+                    ax_monthly.text(0.5, 0.5, "Nema podataka", ha="center", va="center")
+                else:
+                    month_names = [
+                        "JAN",
+                        "FEB",
+                        "MAR",
+                        "APR",
+                        "MAJ",
+                        "JUN",
+                        "JUL",
+                        "AVG",
+                        "SEP",
+                        "OKT",
+                        "NOV",
+                        "DEC",
+                    ]
+                    years = {p.split("-")[0] for (p, _, _, _) in monthly if p}
+                    show_year = len(years) > 1
+                    labels = []
+                    bruto = []
+                    troskovi = []
+                    neto = []
+                    for period, b, t, n in monthly:
+                        try:
+                            y, m = period.split("-")
+                            mi = int(m)
+                        except Exception:
+                            y = period[:4]
+                            mi = 1
+                        lab = month_names[mi - 1] if 1 <= mi <= 12 else period
+                        if show_year:
+                            lab = f"{lab}-{y[-2:]}"
+                        labels.append(lab)
+                        bruto.append(float(b or 0.0))
+                        troskovi.append(float(t or 0.0))
+                        neto.append(float(n or 0.0))
+
+                    x = list(range(len(labels)))
+                    w = 0.25
+                    x_l = [i - w for i in x]
+                    x_r = [i + w for i in x]
+                    ax_monthly.bar(x_l, bruto, width=w, label="Prihodi", color="#8ecae6")
+                    ax_monthly.bar(x, troskovi, width=w, label="Rashodi", color="#ffb703")
+                    ax_monthly.bar(x_r, neto, width=w, label="Neto", color="#219ebc")
+                    ax_monthly.set_title("Razlika Prihodi/Rashodi")
+                    ax_monthly.set_xticks(x)
+                    ax_monthly.set_xticklabels(labels, rotation=0)
+                    ax_monthly.grid(axis="y", alpha=0.25)
+                    ax_monthly.legend(loc="upper left")
+                canvas_monthly.draw()
+        except Exception as exc:
+            log_app_error("refresh_finansije", str(exc))
+            try:
+                if ctx.status_var is not None:
+                    ctx.status_var.set(f"Finansije greska: {exc}")
+            except Exception:
+                pass
         finally:
             conn.close()
 
@@ -4997,7 +5119,37 @@ def run_ui(db_path: Path) -> None:
             conn.close()
 
     def export_unpaid_sp_orders():
-        widgets = ctx.state.get("finansije_widgets") or {}
+        start_str, end_str = (None, None)
+        conn = get_conn()
+        try:
+            cols, rows = get_unpaid_sp_orders_details(conn, start_str, end_str)
+            ts = datetime.now().strftime("%d-%m-%Y_%H%M")
+            out_path = write_report(
+                cols, rows, Path("exports"), f"sp-neuplacene-posiljke-{ts}", "xlsx"
+            )
+            messagebox.showinfo("OK", f"Export snimljen: {out_path}")
+        except Exception as exc:
+            log_app_error("export_unpaid_sp", str(exc))
+            messagebox.showerror("Greska", str(exc))
+        finally:
+            conn.close()
+
+    def export_pending_sp_orders():
+        conn = get_conn()
+        try:
+            cols, rows = get_pending_sp_orders_details(conn)
+            ts = datetime.now().strftime("%d-%m-%Y_%H%M")
+            out_path = write_report(
+                cols, rows, Path("exports"), f"sp-na-cekanju-posiljke-{ts}", "xlsx"
+            )
+            messagebox.showinfo("OK", f"Export snimljen: {out_path}")
+        except Exception as exc:
+            log_app_error("export_pending_sp", str(exc))
+            messagebox.showerror("Greska", str(exc))
+        finally:
+            conn.close()
+
+    def export_finansije_neto_breakdown():
         fin_custom = bool(ctx.state.get("fin_period_custom"))
         if fin_custom:
             main_days = None
@@ -5010,14 +5162,14 @@ def run_ui(db_path: Path) -> None:
         start_str, end_str = _resolve_period_to_strings(main_days, main_start, main_end)
         conn = get_conn()
         try:
-            cols, rows = get_unpaid_sp_orders_details(conn, start_str, end_str)
+            cols, rows = get_neto_breakdown_by_orders(conn, main_days, start_str, end_str)
             ts = datetime.now().strftime("%d-%m-%Y_%H%M")
             out_path = write_report(
-                cols, rows, Path("exports"), f"sp-neuplacene-posiljke-{ts}", "xlsx"
+                cols, rows, Path("exports"), f"finansije-cash-breakdown-{ts}", "xlsx"
             )
             messagebox.showinfo("OK", f"Export snimljen: {out_path}")
         except Exception as exc:
-            log_app_error("export_unpaid_sp", str(exc))
+            log_app_error("export_finansije_neto", str(exc))
             messagebox.showerror("Greska", str(exc))
         finally:
             conn.close()
@@ -5248,6 +5400,15 @@ def run_ui(db_path: Path) -> None:
                 "SELECT MAX(dtposted) FROM bank_transactions WHERE dtposted IS NOT NULL"
             )
             max_bank_date = cur.fetchone()[0]
+
+            cur.execute("SELECT MAX(verified_at) FROM sp_prijemi_receipts WHERE verified_at IS NOT NULL")
+            max_sp_prijemi_verified = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM sp_prijemi_receipts")
+            sp_prijemi_count = cur.fetchone()[0]
+
+            kartice_end = get_app_state(conn, "kartice_range_end")
+            kartice_start = get_app_state(conn, "kartice_range_start")
+            kartice_pdf = get_app_state(conn, "kartice_pdf_name")
         finally:
             conn.close()
 
@@ -5262,18 +5423,22 @@ def run_ui(db_path: Path) -> None:
             except Exception:
                 bank_msg = str(max_bank_date)
 
+        kartice_msg = "-"
+        if kartice_start or kartice_end or kartice_pdf:
+            kartice_msg = f"{kartice_start or '-'}–{kartice_end or '-'} ({kartice_pdf or '-'})"
+
         messagebox.showinfo(
-            "Zadnji brojevi",
-            "SP narudzbe (max): {0}\n"
-            "Minimax racun (max): {1}\n"
-            "SP uplate (max): {2}\n"
-            "SP preuzimanja (max): {3}\n"
-            "Zadnji broj izvoda je za {4}".format(
-                max_sp_orders or "-",
-                max_mm or "-",
-                max_sp_payments or "-",
-                max_sp_returns or "-",
-                bank_msg,
+            "Zadnji uvozi",
+            "\n".join(
+                [
+                    f"SP narudzbe (max): {max_sp_orders or '-'}",
+                    f"Minimax racun (max): {max_mm or '-'}",
+                    f"SP uplate (max): {max_sp_payments or '-'}",
+                    f"SP preuzimanja (max): {max_sp_returns or '-'}",
+                    f"SP prijemi (max verified): {max_sp_prijemi_verified or '-'} (prijema: {sp_prijemi_count or 0})",
+                    f"Kartice artikala: {kartice_msg}",
+                    f"Zadnji izvod (banka): {bank_msg}",
+                ]
             ),
         )
 
@@ -5325,6 +5490,29 @@ def run_ui(db_path: Path) -> None:
             conn.close()
         reset_pass_var.set("")
         messagebox.showinfo("OK", "Lozinka za reset je sacuvana.")
+
+    def unlock_finansije_password() -> bool:
+        conn = get_conn()
+        try:
+            stored_hash = get_app_state(conn, "reset_password_hash")
+        finally:
+            conn.close()
+        if not stored_hash:
+            messagebox.showerror(
+                "Greska",
+                "Nije postavljena lozinka za reset. Postavi je u Podesavanja aplikacije.",
+            )
+            return False
+        typed = simpledialog.askstring(
+            "Otključaj Finansije",
+            "Unesi lozinku (ista kao za Reset):",
+            show="*",
+            parent=app,
+        )
+        if not typed or hash_password(typed.strip()) != stored_hash:
+            return False
+        ctx.state["finansije_unlocked"] = True
+        return True
 
     reset_source_var = ctk.StringVar(value=RESET_SPECS[0].label)
     reset_key_by_label = {spec.label: spec.key for spec in RESET_SPECS}
@@ -6582,6 +6770,10 @@ def run_ui(db_path: Path) -> None:
         imported = run_import_folder(import_fn, title, pattern)
         maybe_prompt_financial_refresh(imported_any=imported > 0)
 
+    ctk.CTkButton(
+        base_imports, text="Zadnji uvozi", command=show_last_imports
+    ).pack(anchor="w", pady=(2, 8))
+
     btn_import_sp_orders = ctk.CTkButton(
         base_imports,
         text="SP Narudzbe",
@@ -6782,17 +6974,23 @@ def run_ui(db_path: Path) -> None:
     )
     rate_row = ctk.CTkFrame(settings_body)
     rate_row.pack(fill="x", padx=6, pady=(0, 10))
-    ctk.CTkLabel(rate_row, text="Kurs RSD->BAM:").pack(side="left", padx=(6, 4))
+    ctk.CTkLabel(rate_row, text="1 BAM =").pack(side="left", padx=(6, 4))
     rate_var = ctk.StringVar(value="")
     ent_rate = ctk.CTkEntry(rate_row, width=120, textvariable=rate_var)
     ent_rate.pack(side="left", padx=4)
+    ctk.CTkLabel(rate_row, text="RSD").pack(side="left", padx=(4, 8))
 
     def sync_rate_entry():
         rate = state.get("rate_rsd_to_bam")
         if rate is None:
             rate_var.set("")
             return
-        rate_var.set(f"{rate:.6f}")
+        try:
+            inv = 1.0 / float(rate)
+        except Exception:
+            rate_var.set("")
+            return
+        rate_var.set(f"{inv:.2f}")
 
     def apply_rate_manual():
         text = rate_var.get().strip().replace(",", ".")
@@ -6800,10 +6998,14 @@ def run_ui(db_path: Path) -> None:
             messagebox.showerror("Greska", "Unesi kurs RSD->BAM.")
             return
         try:
-            rate = float(text)
+            bam_to_rsd = float(text)
         except ValueError:
             messagebox.showerror("Greska", "Neispravan kurs.")
             return
+        if bam_to_rsd <= 0:
+            messagebox.showerror("Greska", "Kurs mora biti veći od 0.")
+            return
+        rate = 1.0 / bam_to_rsd
         conn = get_conn()
         try:
             set_app_state(conn, "rate_rsd_to_bam", f"{rate}")
@@ -7016,11 +7218,16 @@ def run_ui(db_path: Path) -> None:
         ctx,
         ctk=ctk,
         tab_finansije=tab_finansije,
+        Figure=Figure,
+        FigureCanvasTkAgg=FigureCanvasTkAgg,
         messagebox=messagebox,
+        unlock_finansije=unlock_finansije_password,
         pick_date_range_dialog=_pick_date_range_dialog,
         format_user_date=_format_user_date,
         refresh_finansije=refresh_finansije,
         export_unpaid_sp_orders=export_unpaid_sp_orders,
+        export_pending_sp_orders=export_pending_sp_orders,
+        export_neto_breakdown=export_finansije_neto_breakdown,
     )
 
     ctx.state["troskovi_widgets"] = build_troskovi_tab(
