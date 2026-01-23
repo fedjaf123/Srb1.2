@@ -3980,6 +3980,32 @@ def run_ui(db_path: Path) -> None:
                 return val * rate
         return val
 
+    def format_amount_selected_only(amount: float) -> str:
+        try:
+            rsd_val = float(amount)
+        except (TypeError, ValueError):
+            return "0 RSD"
+        mode = state.get("currency_mode", "RSD")
+        rate = state.get("rate_rsd_to_bam")
+
+        def fmt(val: float) -> str:
+            return f"{val:,.0f}".replace(",", ".")
+
+        if mode == "BAM" and rate is not None:
+            return f"{fmt(rsd_val * rate)} BAM"
+        return f"{fmt(rsd_val)} RSD"
+
+    def format_display_amount(val: float) -> str:
+        try:
+            num = float(val or 0.0)
+        except (TypeError, ValueError):
+            num = 0.0
+
+        def fmt(v: float) -> str:
+            return f"{v:,.0f}".replace(",", ".")
+
+        return f"{fmt(num)} {chart_currency_label()}"
+
     def _parse_user_date(text: str) -> date | None:
         from srb_modules.ui_helpers import parse_user_date
 
@@ -4412,22 +4438,85 @@ def run_ui(db_path: Path) -> None:
                         if show_year:
                             lab = f"{lab}-{y[-2:]}"
                         labels.append(lab)
-                        bruto.append(float(b or 0.0))
-                        troskovi.append(float(t or 0.0))
-                        neto.append(float(n or 0.0))
+                        bruto.append(chart_value(float(b or 0.0)))
+                        troskovi.append(chart_value(float(t or 0.0)))
+                        neto.append(chart_value(float(n or 0.0)))
 
                     x = list(range(len(labels)))
                     w = 0.25
                     x_l = [i - w for i in x]
                     x_r = [i + w for i in x]
-                    ax_monthly.bar(x_l, bruto, width=w, label="Prihodi", color="#8ecae6")
-                    ax_monthly.bar(x, troskovi, width=w, label="Rashodi", color="#ffb703")
-                    ax_monthly.bar(x_r, neto, width=w, label="Neto", color="#219ebc")
-                    ax_monthly.set_title("Razlika Prihodi/Rashodi")
+                    cont_prihodi = ax_monthly.bar(
+                        x_l, bruto, width=w, label="Prihodi", color="#8ecae6"
+                    )
+                    cont_rashodi = ax_monthly.bar(
+                        x, troskovi, width=w, label="Rashodi", color="#ffb703"
+                    )
+                    cont_neto = ax_monthly.bar(
+                        x_r, neto, width=w, label="Neto", color="#219ebc"
+                    )
+                    ax_monthly.set_title(f"Razlika Prihodi/Rashodi ({chart_currency_label()})")
                     ax_monthly.set_xticks(x)
                     ax_monthly.set_xticklabels(labels, rotation=0)
                     ax_monthly.grid(axis="y", alpha=0.25)
                     ax_monthly.legend(loc="upper left")
+
+                    # Hover tooltip (one-time wiring per canvas)
+                    tooltip = ctx.state.get("fin_monthly_tooltip")
+                    if not tooltip:
+                        annot = ax_monthly.annotate(
+                            "",
+                            xy=(0, 0),
+                            xytext=(12, 12),
+                            textcoords="offset points",
+                            bbox=dict(boxstyle="round", fc="white", ec="#666666", alpha=0.95),
+                            arrowprops=dict(arrowstyle="->", color="#666666"),
+                        )
+                        annot.set_visible(False)
+                        tooltip = {"annot": annot, "items": []}
+                        ctx.state["fin_monthly_tooltip"] = tooltip
+
+                        def _on_fin_hover(event):
+                            if event.inaxes != ax_monthly:
+                                annot.set_visible(False)
+                                canvas_monthly.draw_idle()
+                                return
+                            items = ctx.state.get("fin_monthly_tooltip", {}).get("items") or []
+                            for patch, series, lab, val in items:
+                                contains, _ = patch.contains(event)
+                                if not contains:
+                                    continue
+                                xmid = patch.get_x() + patch.get_width() / 2.0
+                                ytop = patch.get_y() + patch.get_height()
+                                annot.xy = (xmid, ytop)
+                                annot.set_text(f"{series} {lab}: {format_display_amount(val)}")
+                                annot.set_visible(True)
+                                canvas_monthly.draw_idle()
+                                return
+                            if annot.get_visible():
+                                annot.set_visible(False)
+                                canvas_monthly.draw_idle()
+
+                        def _on_fin_leave(_event):
+                            if annot.get_visible():
+                                annot.set_visible(False)
+                                canvas_monthly.draw_idle()
+
+                        canvas_monthly.mpl_connect("motion_notify_event", _on_fin_hover)
+                        canvas_monthly.mpl_connect("figure_leave_event", _on_fin_leave)
+
+                    # Update hover items every refresh (new patches each draw)
+                    items = []
+                    for idx, patch in enumerate(cont_prihodi.patches):
+                        if idx < len(labels):
+                            items.append((patch, "Prihodi", labels[idx], bruto[idx]))
+                    for idx, patch in enumerate(cont_rashodi.patches):
+                        if idx < len(labels):
+                            items.append((patch, "Rashodi", labels[idx], troskovi[idx]))
+                    for idx, patch in enumerate(cont_neto.patches):
+                        if idx < len(labels):
+                            items.append((patch, "Neto", labels[idx], neto[idx]))
+                    ctx.state.setdefault("fin_monthly_tooltip", {})["items"] = items
                 canvas_monthly.draw()
         except Exception as exc:
             log_app_error("refresh_finansije", str(exc))
