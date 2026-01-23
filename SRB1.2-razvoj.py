@@ -170,7 +170,9 @@ def load_app_settings() -> dict:
         except Exception:
             return {}
 
-        def _resolve_setting_path(value: str | None, default: Path | None) -> Path | None:
+        def _resolve_setting_path(
+            value: str | None, default: Path | None
+        ) -> Path | None:
             if not value:
                 return default
             try:
@@ -187,7 +189,9 @@ def load_app_settings() -> dict:
                     return alt
                 # Also try last path component under APP_DIR (covers old absolute folder roots).
                 try:
-                    alt2 = APP_DIR / Path(*raw.parts[-2:])  # e.g. "Kalkulacije_kartice_art/izlaz"
+                    alt2 = APP_DIR / Path(
+                        *raw.parts[-2:]
+                    )  # e.g. "Kalkulacije_kartice_art/izlaz"
                     if alt2.exists():
                         return alt2
                 except Exception:
@@ -209,12 +213,19 @@ def load_app_settings() -> dict:
                 return str(path)
 
         desired = {
-            "db_path": _store_setting_path(_resolve_setting_path(data.get("db_path"), DB_PATH)),
+            "db_path": _store_setting_path(
+                _resolve_setting_path(data.get("db_path"), DB_PATH)
+            ),
             "kalkulacije_output_dir": _store_setting_path(
-                _resolve_setting_path(data.get("kalkulacije_output_dir"), APP_DIR / "Kalkulacije_kartice_art")
+                _resolve_setting_path(
+                    data.get("kalkulacije_output_dir"),
+                    APP_DIR / "Kalkulacije_kartice_art",
+                )
             ),
             "kartice_output_dir": _store_setting_path(
-                _resolve_setting_path(data.get("kartice_output_dir"), APP_DIR / "Kartice artikala")
+                _resolve_setting_path(
+                    data.get("kartice_output_dir"), APP_DIR / "Kartice artikala"
+                )
             ),
         }
         changed = False
@@ -250,7 +261,11 @@ def save_app_settings(values: dict) -> None:
             return p
 
     for key, val in list(values.items()):
-        if key in {"db_path", "kalkulacije_output_dir", "kartice_output_dir"} and isinstance(val, str):
+        if key in {
+            "db_path",
+            "kalkulacije_output_dir",
+            "kartice_output_dir",
+        } and isinstance(val, str):
             values[key] = _maybe_rel(val)
     data.update(values)
     SETTINGS_PATH.write_text(
@@ -3869,7 +3884,11 @@ def run_ui(db_path: Path) -> None:
     settings = load_app_settings()
     stored_db = settings.get("db_path")
     if stored_db:
-        db_path = (APP_DIR / Path(str(stored_db))).resolve() if not Path(str(stored_db)).is_absolute() else Path(str(stored_db))
+        db_path = (
+            (APP_DIR / Path(str(stored_db))).resolve()
+            if not Path(str(stored_db)).is_absolute()
+            else Path(str(stored_db))
+        )
     state = {
         "db_path": db_path,
         "period_days": None,
@@ -4133,8 +4152,12 @@ def run_ui(db_path: Path) -> None:
             _promo_cache["mtime"] = mtime
             return _promo_cache["df"]
         if not df.empty:
-            df["promo_start_dt"] = pd.to_datetime(df.get("promo_start"), errors="coerce").dt.date
-            df["promo_end_dt"] = pd.to_datetime(df.get("promo_end"), errors="coerce").dt.date
+            df["promo_start_dt"] = pd.to_datetime(
+                df.get("promo_start"), errors="coerce"
+            ).dt.date
+            df["promo_end_dt"] = pd.to_datetime(
+                df.get("promo_end"), errors="coerce"
+            ).dt.date
         _promo_cache["df"] = df
         _promo_cache["mtime"] = mtime
         return df
@@ -4329,7 +4352,9 @@ def run_ui(db_path: Path) -> None:
                     720: "24 mjeseca",
                 }
                 try:
-                    period_label_var.set(f"Dashboard: {mapping.get(main_days, 'period')}")
+                    period_label_var.set(
+                        f"Dashboard: {mapping.get(main_days, 'period')}"
+                    )
                 except Exception:
                     pass
 
@@ -4383,7 +4408,9 @@ def run_ui(db_path: Path) -> None:
                     diff_net = net_profit - cmp_net
                     pct_net = (diff_net / cmp_net * 100.0) if cmp_net else None
                     pct_net_txt = f" ({pct_net:+.1f}%)" if pct_net is not None else ""
-                    lbl_net_delta.configure(text=f"Δ {format_amount(diff_net)}{pct_net_txt}")
+                    lbl_net_delta.configure(
+                        text=f"Δ {format_amount(diff_net)}{pct_net_txt}"
+                    )
             else:
                 if lbl_cmp is not None:
                     lbl_cmp.configure(text="-")
@@ -4401,7 +4428,9 @@ def run_ui(db_path: Path) -> None:
                 pending_var.set(f"{pending_cnt} | {format_amount(pending_sum)}")
 
             if ax_monthly is not None and canvas_monthly is not None:
-                monthly = get_finansije_monthly(conn, main_days, main_start_str, main_end_str)
+                monthly = get_finansije_monthly(
+                    conn, main_days, main_start_str, main_end_str
+                )
                 ax_monthly.clear()
                 if not monthly:
                     ax_monthly.set_title("Razlika Prihodi/Rashodi (nema podataka)")
@@ -4455,7 +4484,9 @@ def run_ui(db_path: Path) -> None:
                     cont_neto = ax_monthly.bar(
                         x_r, neto, width=w, label="Neto", color="#219ebc"
                     )
-                    ax_monthly.set_title(f"Razlika Prihodi/Rashodi ({chart_currency_label()})")
+                    ax_monthly.set_title(
+                        f"Razlika Prihodi/Rashodi ({chart_currency_label()})"
+                    )
                     ax_monthly.set_xticks(x)
                     ax_monthly.set_xticklabels(labels, rotation=0)
                     ax_monthly.grid(axis="y", alpha=0.25)
@@ -4469,7 +4500,9 @@ def run_ui(db_path: Path) -> None:
                             xy=(0, 0),
                             xytext=(12, 12),
                             textcoords="offset points",
-                            bbox=dict(boxstyle="round", fc="white", ec="#666666", alpha=0.95),
+                            bbox=dict(
+                                boxstyle="round", fc="white", ec="#666666", alpha=0.95
+                            ),
                             arrowprops=dict(arrowstyle="->", color="#666666"),
                         )
                         annot.set_visible(False)
@@ -4481,7 +4514,10 @@ def run_ui(db_path: Path) -> None:
                                 annot.set_visible(False)
                                 canvas_monthly.draw_idle()
                                 return
-                            items = ctx.state.get("fin_monthly_tooltip", {}).get("items") or []
+                            items = (
+                                ctx.state.get("fin_monthly_tooltip", {}).get("items")
+                                or []
+                            )
                             for patch, series, lab, val in items:
                                 contains, _ = patch.contains(event)
                                 if not contains:
@@ -4489,7 +4525,9 @@ def run_ui(db_path: Path) -> None:
                                 xmid = patch.get_x() + patch.get_width() / 2.0
                                 ytop = patch.get_y() + patch.get_height()
                                 annot.xy = (xmid, ytop)
-                                annot.set_text(f"{series} {lab}: {format_display_amount(val)}")
+                                annot.set_text(
+                                    f"{series} {lab}: {format_display_amount(val)}"
+                                )
                                 annot.set_visible(True)
                                 canvas_monthly.draw_idle()
                                 return
@@ -4812,7 +4850,8 @@ def run_ui(db_path: Path) -> None:
             log_app_error("extract_bank_refunds", str(exc))
         try:
             has_invoice_matches = (
-                int(conn.execute("SELECT COUNT(*) FROM invoice_matches").fetchone()[0]) > 0
+                int(conn.execute("SELECT COUNT(*) FROM invoice_matches").fetchone()[0])
+                > 0
             )
         except Exception:
             has_invoice_matches = False
@@ -4892,7 +4931,9 @@ def run_ui(db_path: Path) -> None:
             )
         else:
             if top_customers and not has_invoice_matches:
-                ax_ref_items.set_title("Top 5 artikala (povrati) - potrebno uparivanje Minimax")
+                ax_ref_items.set_title(
+                    "Top 5 artikala (povrati) - potrebno uparivanje Minimax"
+                )
             else:
                 ax_ref_items.set_title("Top 5 artikala (povrati, nema podataka)")
         canvas_ref_items.draw()
@@ -4917,7 +4958,9 @@ def run_ui(db_path: Path) -> None:
             )
         else:
             if top_customers and not has_invoice_matches:
-                ax_ref_categories.set_title("Top 5 grupa (povrati) - potrebno uparivanje Minimax")
+                ax_ref_categories.set_title(
+                    "Top 5 grupa (povrati) - potrebno uparivanje Minimax"
+                )
             else:
                 ax_ref_categories.set_title("Top 5 grupa (povrati, nema podataka)")
         canvas_ref_categories.draw()
@@ -5251,7 +5294,9 @@ def run_ui(db_path: Path) -> None:
         start_str, end_str = _resolve_period_to_strings(main_days, main_start, main_end)
         conn = get_conn()
         try:
-            cols, rows = get_neto_breakdown_by_orders(conn, main_days, start_str, end_str)
+            cols, rows = get_neto_breakdown_by_orders(
+                conn, main_days, start_str, end_str
+            )
             ts = datetime.now().strftime("%d-%m-%Y_%H%M")
             out_path = write_report(
                 cols, rows, Path("exports"), f"finansije-cash-breakdown-{ts}", "xlsx"
@@ -5294,7 +5339,15 @@ def run_ui(db_path: Path) -> None:
         if not files:
             messagebox.showwarning("Info", f"Nema fajlova za import ({pattern}).")
             return 0
-        log_app_event("import_folder", "start", title=title, folder=str(folder), pattern=pattern, files=len(files), db=str(state.get("db_path")))
+        log_app_event(
+            "import_folder",
+            "start",
+            title=title,
+            folder=str(folder),
+            pattern=pattern,
+            files=len(files),
+            db=str(state.get("db_path")),
+        )
         for btn in ctx.action_buttons or []:
             btn.configure(state="disabled")
         ctx.progress.configure(mode="determinate")
@@ -5335,9 +5388,7 @@ def run_ui(db_path: Path) -> None:
                         log_app_error("import_folder", f"{title} {path.name}: {exc}")
                 pct = idx / total if total else 1
                 ctx.progress.set(pct)
-                ctx.progress_pct_var.set(
-                    f"Napredak: {int(pct * 100)}% ({idx}/{total})"
-                )
+                ctx.progress_pct_var.set(f"Napredak: {int(pct * 100)}% ({idx}/{total})")
                 ctx.status_var.set(f"Uvoz: {idx}/{total}")
                 app.update_idletasks()
             msg = f"Import zavrsen. Fajlova: {imported}."
@@ -5348,7 +5399,14 @@ def run_ui(db_path: Path) -> None:
             if failed:
                 msg += f"\nGreska na fajlovima: {failed}"
             messagebox.showinfo("OK", msg)
-            log_app_event("import_folder", "done", title=title, imported=imported, skipped=len(skipped), rejects=len(rejects))
+            log_app_event(
+                "import_folder",
+                "done",
+                title=title,
+                imported=imported,
+                skipped=len(skipped),
+                rejects=len(rejects),
+            )
             if rejects:
                 ts = datetime.now().strftime("%Y%m%d%H%M%S")
                 out_path = Path("exports") / f"rejected-rows-{ts}.xlsx"
@@ -5372,24 +5430,67 @@ def run_ui(db_path: Path) -> None:
         return imported
 
     def run_import_default_folder(
-        folder: Path, import_fn, title: str, pattern: str, *, silent_missing: bool = False
+        folder: Path,
+        import_fn,
+        title: str,
+        pattern: str,
+        *,
+        silent_missing: bool = False,
     ) -> tuple[int, int]:
         if not folder.exists():
             if silent_missing:
-                log_app_event("import_auto", "missing_folder", title=title, folder=str(folder), pattern=pattern, silent=True)
+                log_app_event(
+                    "import_auto",
+                    "missing_folder",
+                    title=title,
+                    folder=str(folder),
+                    pattern=pattern,
+                    silent=True,
+                )
                 return (0, 0)
             messagebox.showwarning("Info", f"Nema foldera: {folder}")
-            log_app_event("import_auto", "missing_folder", title=title, folder=str(folder), pattern=pattern, silent=False)
+            log_app_event(
+                "import_auto",
+                "missing_folder",
+                title=title,
+                folder=str(folder),
+                pattern=pattern,
+                silent=False,
+            )
             return (0, 0)
         files = sorted(folder.glob(pattern))
         if not files:
             if silent_missing:
-                log_app_event("import_auto", "no_files", title=title, folder=str(folder), pattern=pattern, silent=True)
+                log_app_event(
+                    "import_auto",
+                    "no_files",
+                    title=title,
+                    folder=str(folder),
+                    pattern=pattern,
+                    silent=True,
+                )
                 return (0, 0)
-            messagebox.showwarning("Info", f"Nema fajlova za import ({pattern}) u {folder}.")
-            log_app_event("import_auto", "no_files", title=title, folder=str(folder), pattern=pattern, silent=False)
+            messagebox.showwarning(
+                "Info", f"Nema fajlova za import ({pattern}) u {folder}."
+            )
+            log_app_event(
+                "import_auto",
+                "no_files",
+                title=title,
+                folder=str(folder),
+                pattern=pattern,
+                silent=False,
+            )
             return (0, 0)
-        log_app_event("import_auto", "start", title=title, folder=str(folder), pattern=pattern, files=len(files), db=str(state.get("db_path")))
+        log_app_event(
+            "import_auto",
+            "start",
+            title=title,
+            folder=str(folder),
+            pattern=pattern,
+            files=len(files),
+            db=str(state.get("db_path")),
+        )
         for btn in ctx.action_buttons or []:
             btn.configure(state="disabled")
         ctx.progress.configure(mode="determinate")
@@ -5430,9 +5531,7 @@ def run_ui(db_path: Path) -> None:
                         log_app_error("import_auto", f"{title} {path.name}: {exc}")
                 pct = idx / total if total else 1
                 ctx.progress.set(pct)
-                ctx.progress_pct_var.set(
-                    f"Napredak: {int(pct * 100)}% ({idx}/{total})"
-                )
+                ctx.progress_pct_var.set(f"Napredak: {int(pct * 100)}% ({idx}/{total})")
                 ctx.status_var.set(f"Uvoz: {idx}/{total}")
                 app.update_idletasks()
             if rejects:
@@ -5447,7 +5546,15 @@ def run_ui(db_path: Path) -> None:
             ctx.status_var.set("Spremno.")
             for btn in ctx.action_buttons or []:
                 btn.configure(state="normal")
-        log_app_event("import_auto", "done", title=title, imported=imported, skipped=skipped, failed=failed, rejects=len(rejects))
+        log_app_event(
+            "import_auto",
+            "done",
+            title=title,
+            imported=imported,
+            skipped=skipped,
+            failed=failed,
+            rejects=len(rejects),
+        )
         return (imported, skipped)
 
     def show_last_imports():
@@ -5490,7 +5597,9 @@ def run_ui(db_path: Path) -> None:
             )
             max_bank_date = cur.fetchone()[0]
 
-            cur.execute("SELECT MAX(verified_at) FROM sp_prijemi_receipts WHERE verified_at IS NOT NULL")
+            cur.execute(
+                "SELECT MAX(verified_at) FROM sp_prijemi_receipts WHERE verified_at IS NOT NULL"
+            )
             max_sp_prijemi_verified = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM sp_prijemi_receipts")
             sp_prijemi_count = cur.fetchone()[0]
@@ -5514,7 +5623,9 @@ def run_ui(db_path: Path) -> None:
 
         kartice_msg = "-"
         if kartice_start or kartice_end or kartice_pdf:
-            kartice_msg = f"{kartice_start or '-'}–{kartice_end or '-'} ({kartice_pdf or '-'})"
+            kartice_msg = (
+                f"{kartice_start or '-'}–{kartice_end or '-'} ({kartice_pdf or '-'})"
+            )
 
         messagebox.showinfo(
             "Zadnji uvozi",
@@ -6191,7 +6302,11 @@ def run_ui(db_path: Path) -> None:
         tracking_status_var = widgets.get("tracking_status_var")
         tracking_batch_var = widgets.get("tracking_batch_var")
         tracking_force_var = widgets.get("tracking_force_var")
-        if not tracking_status_var or not tracking_batch_var or tracking_force_var is None:
+        if (
+            not tracking_status_var
+            or not tracking_batch_var
+            or tracking_force_var is None
+        ):
             messagebox.showerror("Greska", "UI (Nepreuzete) nije inicijalizovan.")
             return
         state["tracking_polling"] = True
@@ -6289,7 +6404,12 @@ def run_ui(db_path: Path) -> None:
         txt_test_order = widgets.get("txt_test_order")
         txt_test_invoice = widgets.get("txt_test_invoice")
         test_size_var = widgets.get("test_size_var")
-        if not lbl_test_status or not txt_test_order or not txt_test_invoice or not test_size_var:
+        if (
+            not lbl_test_status
+            or not txt_test_order
+            or not txt_test_invoice
+            or not test_size_var
+        ):
             messagebox.showerror("Greska", "UI (test uparivanja) nije inicijalizovan.")
             return
         try:
@@ -6649,7 +6769,9 @@ def run_ui(db_path: Path) -> None:
             return None
         try:
             pdf_stat = pdf_path.stat()
-            pdf_sig = f"{pdf_path.name}:{int(pdf_stat.st_size)}:{int(pdf_stat.st_mtime)}"
+            pdf_sig = (
+                f"{pdf_path.name}:{int(pdf_stat.st_size)}:{int(pdf_stat.st_mtime)}"
+            )
         except OSError:
             pdf_sig = pdf_path.name
 
@@ -6659,7 +6781,9 @@ def run_ui(db_path: Path) -> None:
             db_sig = f"{int(db_stat.st_size)}:{int(db_stat.st_mtime)}"
         except OSError:
             db_sig = "na"
-        return hashlib.sha1(f"{pdf_sig}|{prijemi_sig}|{db_sig}".encode("utf-8")).hexdigest()
+        return hashlib.sha1(
+            f"{pdf_sig}|{prijemi_sig}|{db_sig}".encode("utf-8")
+        ).hexdigest()
 
     def confirm_regen_metrics():
         new_sig = _compute_regen_signature()
@@ -6681,12 +6805,12 @@ def run_ui(db_path: Path) -> None:
 
         ok = messagebox.askyesno(
             "Regenerisi metrike",
-                    "Ovo ce:\n"
-                    "- procitati najnoviji PDF iz 'Kartice artikala'\n"
-                    "- procitati sve xlsx iz 'SP Prijemi'\n"
-                    "- ponovo izracunati 'sku_daily_metrics.csv'\n\n"
-                    "Nastaviti?",
-                )
+            "Ovo ce:\n"
+            "- procitati najnoviji PDF iz 'Kartice artikala'\n"
+            "- procitati sve xlsx iz 'SP Prijemi'\n"
+            "- ponovo izracunati 'sku_daily_metrics.csv'\n\n"
+            "Nastaviti?",
+        )
         if not ok:
             return
         regen_progress_var.set("Regenerisanje metrika: 0%")
@@ -6704,7 +6828,14 @@ def run_ui(db_path: Path) -> None:
 
         run_action_async_process(
             run_regenerate_sku_metrics_process,
-            [str(PDF_ROOT), str(PRIJEMI_ROOT), str(METRICS_OUT), str(SP_DB), str(state["db_path"]), REGEN_TASK],
+            [
+                str(PDF_ROOT),
+                str(PRIJEMI_ROOT),
+                str(METRICS_OUT),
+                str(SP_DB),
+                str(state["db_path"]),
+                REGEN_TASK,
+            ],
             "Regenerisi metrike",
             progress_task=REGEN_TASK,
             on_success=on_regen_success,
@@ -6789,8 +6920,6 @@ def run_ui(db_path: Path) -> None:
 
     # (prodaja refresh/export logika je definirana niže, nakon što se UI builda u modulu)
 
-
-
     prodaja_logic = init_prodaja_logic(
         ctx,
         ProdajaLogicDeps(
@@ -6859,9 +6988,9 @@ def run_ui(db_path: Path) -> None:
         imported = run_import_folder(import_fn, title, pattern)
         maybe_prompt_financial_refresh(imported_any=imported > 0)
 
-    ctk.CTkButton(
-        base_imports, text="Zadnji uvozi", command=show_last_imports
-    ).pack(anchor="w", pady=(2, 8))
+    ctk.CTkButton(base_imports, text="Zadnji uvozi", command=show_last_imports).pack(
+        anchor="w", pady=(2, 8)
+    )
 
     btn_import_sp_orders = ctk.CTkButton(
         base_imports,
@@ -6947,14 +7076,20 @@ def run_ui(db_path: Path) -> None:
     )
     btn_refresh_external.pack(side="left", padx=(0, 6))
 
-    btn_regen = ctk.CTkButton(metrics_row, text="Regenerisi metrike", command=confirm_regen_metrics)
+    btn_regen = ctk.CTkButton(
+        metrics_row, text="Regenerisi metrike", command=confirm_regen_metrics
+    )
     btn_regen.pack(side="left", padx=6)
 
     regen_progress = ctk.CTkProgressBar(settings_body, mode="determinate")
     regen_progress.set(0)
     regen_progress.pack(in_=settings_body, fill="x", padx=6, pady=(0, 0))
-    ctk.CTkLabel(settings_body, textvariable=regen_progress_var).pack(anchor="w", padx=6, pady=(2, 10))
-    ctk.CTkLabel(settings_body, textvariable=kartice_status_var).pack(anchor="w", padx=6, pady=(0, 10))
+    ctk.CTkLabel(settings_body, textvariable=regen_progress_var).pack(
+        anchor="w", padx=6, pady=(2, 10)
+    )
+    ctk.CTkLabel(settings_body, textvariable=kartice_status_var).pack(
+        anchor="w", padx=6, pady=(0, 10)
+    )
     refresh_kartice_status()
 
     def _resolve_existing_folder(*names: str) -> Path | None:
@@ -6978,11 +7113,10 @@ def run_ui(db_path: Path) -> None:
             return
         totals = []
         totals.append(
-            (
-                "SP Narudzbe",
-            )
+            ("SP Narudzbe",)
             + run_import_default_folder(
-                _resolve_existing_folder("SP Narudzbe", "SP-Narudzbe") or Path("SP Narudzbe"),
+                _resolve_existing_folder("SP Narudzbe", "SP-Narudzbe")
+                or Path("SP Narudzbe"),
                 import_sp_orders,
                 "SP Narudzbe (auto)",
                 "*.xlsx",
@@ -7438,12 +7572,20 @@ def run_smoke_tests() -> int:
             init_db(mem)
             rejects: list[dict] = []
             import_sp_prijemi(mem, prijemi_files[0], rejects=rejects)
-            receipts = int(mem.execute("SELECT COUNT(*) FROM sp_prijemi_receipts").fetchone()[0])
-            lines = int(mem.execute("SELECT COUNT(*) FROM sp_prijemi_lines").fetchone()[0])
+            receipts = int(
+                mem.execute("SELECT COUNT(*) FROM sp_prijemi_receipts").fetchone()[0]
+            )
+            lines = int(
+                mem.execute("SELECT COUNT(*) FROM sp_prijemi_lines").fetchone()[0]
+            )
             check("sp_prijemi import receipt", receipts == 1, f"receipts={receipts}")
             check("sp_prijemi import lines", lines > 0, f"lines={lines}")
             import_sp_prijemi(mem, prijemi_files[0], rejects=rejects)
-            runs = int(mem.execute("SELECT COUNT(*) FROM import_runs WHERE source='SP-Prijemi'").fetchone()[0])
+            runs = int(
+                mem.execute(
+                    "SELECT COUNT(*) FROM import_runs WHERE source='SP-Prijemi'"
+                ).fetchone()[0]
+            )
             check("sp_prijemi file dedupe", runs == 1, f"runs={runs}")
         finally:
             try:
@@ -7502,7 +7644,9 @@ def main() -> None:
     sp_returns.add_argument("path", type=Path)
 
     sp_prijemi = sub.add_parser("import-sp-prijemi")
-    sp_prijemi.add_argument("path", type=Path, help="Fajl ili folder sa SP Prijemi (*.xlsx)")
+    sp_prijemi.add_argument(
+        "path", type=Path, help="Fajl ili folder sa SP Prijemi (*.xlsx)"
+    )
 
     kartice = sub.add_parser("import-kartice-events")
     kartice.add_argument(
