@@ -405,8 +405,62 @@ CREATE TABLE IF NOT EXISTS order_items (
   FOREIGN KEY(order_id) REFERENCES orders(id)
 );
 
+DROP INDEX IF EXISTS idx_order_items_unique;
+-- Dedupe existing rows so the unique index can be created safely.
+-- We only dedupe when product_code is present; NULL/empty codes are left as-is.
+WITH d AS (
+  SELECT
+    MIN(id) AS keep_id,
+    order_id,
+    product_code,
+    cod_amount,
+    discount,
+    extra_discount,
+    SUM(COALESCE(qty, 0)) AS sum_qty,
+    SUM(COALESCE(advance_amount, 0)) AS sum_adv,
+    MAX(COALESCE(addon_cod, 0)) AS max_addon_cod,
+    MAX(COALESCE(addon_advance, 0)) AS max_addon_adv
+  FROM order_items
+  WHERE product_code IS NOT NULL AND TRIM(product_code) != ''
+  GROUP BY order_id, product_code, cod_amount, discount, extra_discount
+  HAVING COUNT(*) > 1
+)
+UPDATE order_items
+SET
+  qty = (SELECT sum_qty FROM d WHERE d.keep_id = order_items.id),
+  advance_amount = (SELECT sum_adv FROM d WHERE d.keep_id = order_items.id),
+  addon_cod = MAX(COALESCE(addon_cod, 0), (SELECT max_addon_cod FROM d WHERE d.keep_id = order_items.id)),
+  addon_advance = MAX(COALESCE(addon_advance, 0), (SELECT max_addon_adv FROM d WHERE d.keep_id = order_items.id))
+WHERE id IN (SELECT keep_id FROM d);
+
+WITH d AS (
+  SELECT
+    MIN(id) AS keep_id,
+    order_id,
+    product_code,
+    cod_amount,
+    discount,
+    extra_discount
+  FROM order_items
+  WHERE product_code IS NOT NULL AND TRIM(product_code) != ''
+  GROUP BY order_id, product_code, cod_amount, discount, extra_discount
+  HAVING COUNT(*) > 1
+)
+DELETE FROM order_items
+WHERE id IN (
+  SELECT oi.id
+  FROM order_items oi
+  JOIN d
+    ON d.order_id = oi.order_id
+   AND d.product_code IS oi.product_code
+   AND d.cod_amount IS oi.cod_amount
+   AND d.discount IS oi.discount
+   AND d.extra_discount IS oi.extra_discount
+  WHERE oi.id != d.keep_id
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_order_items_unique
-  ON order_items(order_id, product_code, qty, cod_amount);
+  ON order_items(order_id, product_code, cod_amount, discount, extra_discount);
 
 CREATE INDEX IF NOT EXISTS idx_order_items_order
   ON order_items(order_id);
@@ -790,6 +844,7 @@ from srb_modules.queries import (
     get_kpis,
     get_neto_breakdown_by_orders,
     get_needs_invoice_orders,
+    get_top_categories_qty_share,
     get_pending_sp_orders_details,
     get_pending_sp_orders_summary,
     get_refund_total_amount,
@@ -802,6 +857,7 @@ from srb_modules.queries import (
     get_sp_bank_monthly,
     get_top_customers,
     get_top_products,
+    get_top_products_qty,
     get_unmatched_orders_list,
     get_unpicked_category_totals,
     get_unpicked_customer_groups,
@@ -1911,7 +1967,9 @@ def compute_order_amount(cod, addon, advance, addon_advance) -> float | None:
         return None
     base = float(cod or 0) + float(addon or 0)
     paid = float(advance or 0) + float(addon_advance or 0)
-    return base - paid
+    # For Minimax invoice matching, the relevant value is the total shipment/invoice value,
+    # not just COD cash (advance is usually from a previous COD order but still part of the invoice total).
+    return base + paid
 
 
 def apply_percent(value, percent) -> float:
@@ -1952,19 +2010,68 @@ def build_order_net_map(
             f"FROM order_items WHERE order_id IN ({placeholders})",
             chunk,
         ).fetchall()
+        # SP export is inconsistent: some numeric fields are already line totals (not unit prices),
+        # and order-level discount (Popust) may appear only on one row.
+        # For matching with Minimax invoices, we compute order total as:
+        #   SUM( discounted_line_cod_amount ) + discounted_shipping + SUM(advance_amount) + shipping_advance
+        # where:
+        # - order_discount = MAX(discount) per order (applied to all product lines + shipping)
+        # - item_discount = extra_discount (Popust proizvoda), applied to product lines after order_discount
+        # - shipping (addon_cod) is treated as per-order value (MAX across lines)
+        # - shipping advance (addon_advance) treated as per-order (MAX across lines)
+        by_order: dict[int, dict[str, float]] = {}
+        order_discount_map: dict[int, float] = {}
         for row in rows:
             order_id = int(row[0])
+            order_disc = to_float(row[6]) or 0.0
+            if order_disc > order_discount_map.get(order_id, 0.0):
+                order_discount_map[order_id] = order_disc
+            entry = by_order.get(order_id)
+            if not entry:
+                entry = {
+                    "cod_sum": 0.0,
+                    "advance_sum": 0.0,
+                    "addon_cod_max": 0.0,
+                    "addon_adv_max": 0.0,
+                }
+                by_order[order_id] = entry
+            addon_cod = to_float(row[3]) or 0.0
+            addon_adv = to_float(row[5]) or 0.0
+            if addon_cod > entry["addon_cod_max"]:
+                entry["addon_cod_max"] = addon_cod
+            if addon_adv > entry["addon_adv_max"]:
+                entry["addon_adv_max"] = addon_adv
+
+        for row in rows:
+            order_id = int(row[0])
+            entry = by_order.get(order_id)
+            if not entry:
+                continue
+            order_discount = order_discount_map.get(order_id, 0.0)
+            item_discount = row[7]
+
+            # Treat cod_amount as unit price; line total is qty * unit_price.
             qty = to_float(row[1]) or 0.0
-            order_discount = row[7]
-            item_discount = row[6]
-            cod_unit = apply_percent_chain(row[2], [order_discount, item_discount])
-            addon_unit = apply_percent_chain(row[3], [order_discount])
-            cod = qty * cod_unit
-            addon = qty * addon_unit
-            advance = qty * (to_float(row[4]) or 0.0)
-            addon_advance = qty * (to_float(row[5]) or 0.0)
+            cod_unit = to_float(row[2]) or 0.0
+            cod_line_total = qty * cod_unit
+            cod_line = apply_percent_chain(cod_line_total, [order_discount, item_discount])
+            entry["cod_sum"] += float(cod_line or 0.0)
+
+            # Advance is already “paid earlier” and should be counted in invoice total for matching.
+            # Treat advance_amount as unit value; scale by qty.
+            adv_unit = to_float(row[4]) or 0.0
+            adv_line_total = qty * adv_unit
+            adv_line = apply_percent_chain(adv_line_total, [order_discount, item_discount])
+            entry["advance_sum"] += float(adv_line or 0.0)
+
+        for order_id, entry in by_order.items():
+            order_discount = order_discount_map.get(order_id, 0.0)
+            shipping = apply_percent_chain(entry["addon_cod_max"], [order_discount])
             net_map[order_id] = (
-                net_map.get(order_id, 0.0) + cod + addon - advance - addon_advance
+                float(entry["cod_sum"] or 0.0)
+                + float(shipping or 0.0)
+                + float(entry["advance_sum"] or 0.0)
+                + float(entry["addon_adv_max"] or 0.0)
             )
     return net_map
 
@@ -1994,9 +2101,11 @@ def score_match_with_reasons(order, invoice) -> tuple[int, list[str]]:
     inv_date = normalize_date(invoice["turnover"])
     if order_date and inv_date:
         delta = (inv_date - order_date).days
-        if -10 <= delta <= 10:
+        # For Minimax matching we allow invoice date in window [-1..+3] around picked_up_at
+        # (or created_at fallback when picked_up_at is missing).
+        if -1 <= delta <= 3:
             score += 30
-            reasons.append("date-10+10")
+            reasons.append("date-1+3")
     order_amount = order["amount"]
     inv_amount = invoice["amount_due"]
     if amount_exact_strict(order_amount, inv_amount):
@@ -2192,9 +2301,16 @@ def match_minimax(
         "WHERE id NOT IN (SELECT invoice_id FROM invoice_matches)"
     ).fetchall()
     for row in inv_rows:
+        inv_id = int(row[0])
+        # Storno invoices are typically negative; they should not be matched as sales invoices.
+        try:
+            if row[4] is not None and float(row[4]) < 0:
+                continue
+        except (TypeError, ValueError):
+            pass
         invoices.append(
             {
-                "id": int(row[0]),
+                "id": inv_id,
                 "number": row[1],
                 "customer_name": row[2],
                 "turnover": row[3],
@@ -2228,7 +2344,12 @@ def match_minimax(
     maybe_update_progress()
 
     def amount_exact(a, b) -> bool:
-        return amount_exact_strict(a, b)
+        if a is None or b is None:
+            return False
+        try:
+            return abs(round(float(a), 2) - round(float(b), 2)) <= 0.5
+        except (TypeError, ValueError):
+            return False
 
     def name_exact(a, b) -> bool:
         return name_exact_strict(a, b)
@@ -2236,10 +2357,11 @@ def match_minimax(
     def name_close(a, b) -> bool:
         return name_distance_ok(a, b, max_distance=1)
 
-    def date_in_window(d1, d2, days_back: int = 10, days_forward: int = 10) -> bool:
-        if not d1 or not d2:
+    def date_in_window(d_order, d_invoice, days_back: int = 1, days_forward: int = 3) -> bool:
+        # Invoice date must be within [order_date - days_back, order_date + days_forward]
+        if not d_order or not d_invoice:
             return False
-        delta = (d2 - d1).days
+        delta = (d_invoice - d_order).days
         return -days_back <= delta <= days_forward
 
     orders_by_date = {}
@@ -2264,7 +2386,8 @@ def match_minimax(
         idate = inv.get("turnover_date")
         if idate:
             date_candidates = []
-            for offset in range(-10, 11):
+            # invoice_date - order_date ∈ [-1..+3]  =>  order_date ∈ [invoice_date-3, invoice_date+1]
+            for offset in range(-3, 2):
                 date_candidates.extend(
                     orders_by_date.get(idate + timedelta(days=offset), [])
                 )
@@ -2275,7 +2398,7 @@ def match_minimax(
             o
             for o in date_candidates
             if amount_exact(o.get("amount"), inv.get("amount_due"))
-            and date_in_window(o.get("picked_up_date"), idate, 7)
+            and date_in_window(o.get("picked_up_date"), idate, 1, 3)
         ]
         if filtered:
             return filtered
@@ -2285,7 +2408,8 @@ def match_minimax(
         odate = order.get("picked_up_date")
         if odate:
             date_candidates = []
-            for offset in range(-10, 11):
+            # invoice_date - order_date ∈ [-1..+3]
+            for offset in range(-1, 4):
                 date_candidates.extend(
                     invoices_by_date.get(odate + timedelta(days=offset), [])
                 )
@@ -2296,7 +2420,7 @@ def match_minimax(
             inv
             for inv in date_candidates
             if amount_exact(order.get("amount"), inv.get("amount_due"))
-            and date_in_window(odate, inv.get("turnover_date"), 7)
+            and date_in_window(odate, inv.get("turnover_date"), 1, 3)
         ]
         if filtered:
             return filtered
@@ -2312,10 +2436,14 @@ def match_minimax(
         odate = order.get("picked_up_date")
         best = None
         best_key = None
+        # Prefer invoice date offsets in this exact order: -1, 0, +1, +2, +3 (relative to picked_up_at).
+        # This matches real-world behavior where invoices can be issued late in the evening (day -1).
+        offset_rank = {-1: 0, 0: 1, 1: 2, 2: 3, 3: 4}
         for inv in candidates:
             idate = inv.get("turnover_date")
             if odate and idate:
-                delta = abs((idate - odate).days)
+                delta_raw = (idate - odate).days
+                delta = offset_rank.get(delta_raw, 9999)
             else:
                 delta = 9999
             key = (delta, inv["id"])
@@ -2328,7 +2456,7 @@ def match_minimax(
         odate = order.get("picked_up_date")
         if odate:
             date_candidates = []
-            for offset in range(-10, 11):
+            for offset in range(-1, 4):
                 date_candidates.extend(
                     invoices_by_date.get(odate + timedelta(days=offset), [])
                 )
@@ -2343,12 +2471,12 @@ def match_minimax(
             and amount_exact(order.get("amount"), inv.get("amount_due"))
             and (
                 not order.get("picked_up_date")
-                or date_in_window(order.get("picked_up_date"), inv.get("turnover_date"))
+                or date_in_window(order.get("picked_up_date"), inv.get("turnover_date"), 1, 3)
             )
         ]
         return candidates
 
-    # Step 1: exact name + exact amount (+/-10 days).
+    # Strict: exact name + exact amount + date window [-1..+3].
     for order in orders:
         if order["id"] in used_orders:
             continue
@@ -2371,69 +2499,54 @@ def match_minimax(
         used_orders.add(order["id"])
         matched_invoice_ids.add(inv["id"])
 
-    # Step 2: name within 1 char + exact amount (+/-10 days).
+    # Deterministic fallback: exact amount + date window, but allow name mismatch ONLY when there is
+    # exactly one free invoice candidate in the window. This clears many "amount matches but name differs"
+    # cases without introducing fuzzy matching.
+    def find_amount_candidates(order):
+        odate = order.get("picked_up_date")
+        if not odate:
+            return []
+        date_candidates = []
+        for offset in range(-1, 4):
+            date_candidates.extend(invoices_by_date.get(odate + timedelta(days=offset), []))
+        date_candidates.extend(invoices_no_date)
+        return [
+            inv
+            for inv in date_candidates
+            if inv["id"] not in matched_invoice_ids
+            and amount_exact(order.get("amount"), inv.get("amount_due"))
+            and date_in_window(odate, inv.get("turnover_date"), 1, 3)
+        ]
+
     for order in orders:
         if order["id"] in used_orders:
             continue
         processed_steps += 1
         maybe_update_progress()
-        candidates = find_candidates(order, name_close)
-        if not candidates:
+        candidates = find_amount_candidates(order)
+        if len(candidates) != 1:
             continue
-        if order.get("picked_up_date") is None and len(candidates) != 1:
-            continue
-        inv = select_best_invoice(order, candidates)
-        if not inv:
-            continue
+        inv = candidates[0]
         conn.execute(
             "INSERT OR IGNORE INTO invoice_matches "
             "(order_id, invoice_id, score, status, method, matched_at) "
             "VALUES (?, ?, ?, ?, ?, datetime('now'))",
-            (order["id"], inv["id"], 90, "auto", "close-name"),
+            (order["id"], inv["id"], 90, "auto", "amount_unique"),
         )
         used_orders.add(order["id"])
         matched_invoice_ids.add(inv["id"])
 
-    # Store top candidates for unmatched orders.
-    processed_steps += 1
-    maybe_update_progress()
-
-    remaining_invoices = [
-        inv for inv in invoices if inv["id"] not in matched_invoice_ids
-    ]
     for order in orders:
         if order["id"] in used_orders:
             continue
         processed_steps += 1
         maybe_update_progress()
-        candidates = []
-        for inv in candidate_invoices_for_order(order, remaining_invoices):
-            score, reasons = score_match_with_reasons(order, inv)
-            if score > 0:
-                candidates.append((score, inv["id"], ",".join(reasons)))
-        candidates.sort(reverse=True)
-        top = candidates[:3]
-        if not top:
-            conn.execute(
-                "INSERT OR IGNORE INTO order_flags (order_id, flag, note, created_at) "
-                "VALUES (?, 'needs_invoice', NULL, datetime('now'))",
-                (order["id"],),
-            )
-            continue
         conn.execute(
-            "DELETE FROM order_flags WHERE order_id = ? AND flag = 'needs_invoice'",
+            "INSERT OR IGNORE INTO order_flags (order_id, flag, note, created_at) "
+            "VALUES (?, 'needs_invoice', NULL, datetime('now'))",
             (order["id"],),
         )
-        conn.execute(
-            "DELETE FROM invoice_candidates WHERE order_id = ?", (order["id"],)
-        )
-        for score, inv_id, detail in top:
-            conn.execute(
-                "INSERT OR IGNORE INTO invoice_candidates "
-                "(order_id, invoice_id, score, detail, method, created_at) "
-                "VALUES (?, ?, ?, ?, ?, datetime('now'))",
-                (order["id"], inv_id, score, detail, "fuzzy"),
-            )
+        conn.execute("DELETE FROM invoice_candidates WHERE order_id = ?", (order["id"],))
 
     if progress_task:
         update_task_progress(conn, progress_task, total_steps)
@@ -2637,7 +2750,8 @@ def report_conflicts(conn: sqlite3.Connection, return_rows: bool = False):
         if inv_date is None or inv_amount is None:
             continue
         candidates = []
-        for offset in range(-10, 11):
+        # Invoice is expected within +3 days of order; search orders in [inv_date-3, inv_date]
+        for offset in range(-3, 1):
             candidates.extend(orders_by_date.get(inv_date + timedelta(days=offset), []))
         for cand in candidates:
             if cand["id"] == matched_order_id:
@@ -2730,7 +2844,8 @@ def report_nearest_invoice(conn: sqlite3.Connection, return_rows: bool = False):
 
         candidates = []
         if order_date:
-            for offset in range(-10, 11):
+            # Invoice should be within [order_date, order_date+3]
+            for offset in range(0, 4):
                 candidates.extend(
                     invoices_by_date.get(order_date + timedelta(days=offset), [])
                 )
@@ -2856,7 +2971,8 @@ def report_unmatched_reasons(conn: sqlite3.Connection, return_rows: bool = False
                     continue
                 if order_date:
                     date_candidates = []
-                    for offset in range(-10, 11):
+                    # Strict match window: invoice_date - order_date ∈ [-1..+3]
+                    for offset in range(-1, 4):
                         date_candidates.extend(
                             invoices_by_date.get(
                                 order_date + timedelta(days=offset), []
@@ -2905,7 +3021,7 @@ def report_unmatched_reasons(conn: sqlite3.Connection, return_rows: bool = False
                 elif not amount_candidates:
                     reason = "nema_iznosa_u_prozoru"
                 elif name_unmatched:
-                    reason = "ima_kandidata_manual"
+                    reason = "ima_exact_kandidata_u_prozoru"
                 elif name_matched:
                     other_orders = [
                         matched_map.get(inv["id"])
@@ -2917,7 +3033,7 @@ def report_unmatched_reasons(conn: sqlite3.Connection, return_rows: bool = False
                     else:
                         reason = "racun_vec_uparen_ime_iznos"
                 elif unmatched_candidates:
-                    reason = "ima_kandidata_manual"
+                    reason = "ima_iznos_u_prozoru_ali_ne_ime"
                 elif matched_candidates:
                     reason = "racun_vec_uparen"
                 else:
@@ -3830,10 +3946,12 @@ def run_ui(db_path: Path) -> None:
     import threading
     import tkinter as tk
     import time
+    from typing import Any, Callable
     from tkinter import filedialog, messagebox, simpledialog
     from tkcalendar import Calendar
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
+    from tkinter import PhotoImage
 
     def acquire_app_lock():
         lock_path = Path(tempfile.gettempdir()) / "srb1_app.lock"
@@ -3870,16 +3988,28 @@ def run_ui(db_path: Path) -> None:
     app = ctk.CTk()
     app.title("SRB1.2 - Kontrola i Analitika")
     app.geometry("1200x750")
-
-    def on_close():
-        if messagebox.askyesno("Potvrda", "Da li želite završiti rad u aplikaciji?"):
-            try:
-                lock_handle.close()
-            except Exception:
-                pass
-            app.destroy()
-
-    app.protocol("WM_DELETE_WINDOW", on_close)
+    # NOTE: WM_DELETE_WINDOW handler is defined after ctx/get_conn initialization
+    # so we can safely shutdown background workers and avoid orphaned python.exe.
+    # App icon: prefer .ico on Windows (taskbar/titlebar), fallback to .png.
+    try:
+        ico_path = (APP_DIR / "app_icon_ico.ico").resolve()
+        if os.name == "nt" and ico_path.exists():
+            app.iconbitmap(str(ico_path))
+        else:
+            png_path = (APP_DIR / "app_icon.png").resolve()
+            if png_path.exists():
+                _icon_img = PhotoImage(file=str(png_path))
+                app._app_icon_image = _icon_img  # keep ref (prevent GC)
+                app.iconphoto(True, _icon_img)
+    except Exception:
+        try:
+            png_path = (APP_DIR / "app_icon.png").resolve()
+            if png_path.exists():
+                _icon_img = PhotoImage(file=str(png_path))
+                app._app_icon_image = _icon_img
+                app.iconphoto(True, _icon_img)
+        except Exception:
+            pass
 
     settings = load_app_settings()
     stored_db = settings.get("db_path")
@@ -3894,6 +4024,14 @@ def run_ui(db_path: Path) -> None:
         "period_days": None,
         "period_start": None,
         "period_end": None,
+        # Finansije have an independent period selector (do not reuse Dashboard period).
+        "fin_period_days": 360,
+        "fin_period_start": None,
+        "fin_period_end": None,
+        "fin_period_custom": False,
+        "fin_compare_start": None,
+        "fin_compare_end": None,
+        "fin_compare_custom": False,
         "expense_period_days": None,
         "expense_period_start": None,
         "expense_period_end": None,
@@ -3913,11 +4051,102 @@ def run_ui(db_path: Path) -> None:
     _sku_summary_cache = {"mtime": None, "df": pd.DataFrame()}
     _promo_cache = {"mtime": None, "df": pd.DataFrame()}
 
+    _db_init_lock = threading.Lock()
+    _db_initialized = False
+
     def get_conn():
+        nonlocal _db_initialized
         conn = connect_db(state["db_path"])
-        init_db(conn)
-        ensure_customer_keys(conn)
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+        except Exception:
+            pass
+        with _db_init_lock:
+            if not _db_initialized:
+                init_db(conn)
+                ensure_customer_keys(conn)
+                _db_initialized = True
         return conn
+
+    # Runtime state for async/background work
+    ctx.state.setdefault("closing", False)
+    ctx.state.setdefault("active_futures", set())
+    ctx.state.setdefault("import_busy", False)
+    ctx.state.setdefault("import_cancel", False)
+
+    def _shutdown_background_work(*, force: bool) -> None:
+        # Stop scheduling UI updates first.
+        ctx.state["closing"] = True
+        try:
+            ctx.state["import_cancel"] = True
+        except Exception:
+            pass
+
+        futures = list(ctx.state.get("active_futures") or [])
+        active = [f for f in futures if hasattr(f, "done") and not f.done()]
+        if active:
+            for f in active:
+                try:
+                    f.cancel()
+                except Exception:
+                    pass
+
+        exe = getattr(ctx, "executor", None)
+        if exe is None:
+            return
+
+        try:
+            exe.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            try:
+                exe.shutdown(wait=False)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        if not force:
+            return
+
+        # Best-effort hard kill for ProcessPoolExecutor workers to avoid orphaned python.exe.
+        try:
+            procs = getattr(exe, "_processes", None)
+            if isinstance(procs, dict):
+                for p in list(procs.values()):
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def on_close():
+        if not messagebox.askyesno("Potvrda", "Da li želite završiti rad u aplikaciji?"):
+            return
+
+        futures = list(ctx.state.get("active_futures") or [])
+        active = [f for f in futures if hasattr(f, "done") and not f.done()]
+        busy_import = bool(ctx.state.get("import_busy"))
+        if active or busy_import:
+            force = messagebox.askyesno(
+                "Upozorenje",
+                "Trenutno se izvršava proces (uvoz/match/regeneracija).\n\n"
+                "Ako zatvoriš sada, proces će biti prekinut i moguće je da import nije kompletan.\n\n"
+                "Želiš li ipak prekinuti i zatvoriti aplikaciju?",
+            )
+            if not force:
+                return
+            _shutdown_background_work(force=True)
+        else:
+            _shutdown_background_work(force=False)
+
+        try:
+            lock_handle.close()
+        except Exception:
+            pass
+        app.destroy()
+
+    app.protocol("WM_DELETE_WINDOW", on_close)
 
     def load_currency_mode():
         conn = get_conn()
@@ -4322,8 +4551,12 @@ def run_ui(db_path: Path) -> None:
         lbl_net = widgets.get("lbl_net_profit")
         lbl_net_cmp = widgets.get("lbl_net_profit_cmp")
         lbl_net_delta = widgets.get("lbl_net_profit_delta")
-        expenses_var = widgets.get("expenses_var")
-        refunds_var = widgets.get("refunds_var")
+        lbl_expenses = widgets.get("lbl_expenses")
+        lbl_expenses_cmp = widgets.get("lbl_expenses_cmp")
+        lbl_expenses_delta = widgets.get("lbl_expenses_delta")
+        lbl_refunds = widgets.get("lbl_refunds")
+        lbl_refunds_cmp = widgets.get("lbl_refunds_cmp")
+        lbl_refunds_delta = widgets.get("lbl_refunds_delta")
         unpaid_var = widgets.get("unpaid_var")
         pending_var = widgets.get("pending_var")
         ax_monthly = widgets.get("ax_monthly")
@@ -4333,6 +4566,7 @@ def run_ui(db_path: Path) -> None:
             return
 
         fin_custom = bool(ctx.state.get("fin_period_custom"))
+        fin_days = ctx.state.get("fin_period_days")
         fin_start = ctx.state.get("fin_period_start")
         fin_end = ctx.state.get("fin_period_end")
         if fin_custom:
@@ -4340,23 +4574,9 @@ def run_ui(db_path: Path) -> None:
             main_start = fin_start
             main_end = fin_end
         else:
-            main_days = state.get("period_days")
-            main_start = state.get("period_start")
-            main_end = state.get("period_end")
-            if period_label_var is not None:
-                mapping = {
-                    None: "Svo vrijeme",
-                    90: "3 mjeseca",
-                    180: "6 mjeseci",
-                    360: "12 mjeseci",
-                    720: "24 mjeseca",
-                }
-                try:
-                    period_label_var.set(
-                        f"Dashboard: {mapping.get(main_days, 'period')}"
-                    )
-                except Exception:
-                    pass
+            main_days = fin_days
+            main_start = None
+            main_end = None
 
         main_start_str, main_end_str = _resolve_period_to_strings(
             main_days, main_start, main_end
@@ -4373,10 +4593,10 @@ def run_ui(db_path: Path) -> None:
             refunds_total = float(
                 get_refund_total_amount(conn, main_days, main_start_str, main_end_str)
             )
-            if expenses_var is not None:
-                expenses_var.set(format_amount(-expenses_total))
-            if refunds_var is not None:
-                refunds_var.set(format_amount(-refunds_total))
+            if lbl_expenses is not None:
+                lbl_expenses.configure(text=format_amount(-expenses_total))
+            if lbl_refunds is not None:
+                lbl_refunds.configure(text=format_amount(-refunds_total))
             net_profit = gross_cash - expenses_total
             if lbl_net is not None:
                 lbl_net.configure(text=format_amount(net_profit))
@@ -4397,10 +4617,41 @@ def run_ui(db_path: Path) -> None:
                     diff = main_val - cmp_val
                     pct = (diff / cmp_val * 100.0) if cmp_val else None
                     pct_txt = f" ({pct:+.1f}%)" if pct is not None else ""
-                    lbl_delta.configure(text=f"Δ {format_amount(diff)}{pct_txt}")
+                    try:
+                        lbl_delta.configure(
+                            text=f"Δ {format_amount(diff)}{pct_txt}",
+                            text_color="#2a9d8f" if diff >= 0 else "#d62828",
+                        )
+                    except Exception:
+                        lbl_delta.configure(text=f"Δ {format_amount(diff)}{pct_txt}")
 
                 cmp_exp = get_expense_summary(conn, None, cmp_start_str, cmp_end_str)
                 cmp_exp_total = float(cmp_exp.get("total", 0.0) or 0.0)
+                cmp_refunds_total = float(
+                    get_refund_total_amount(conn, None, cmp_start_str, cmp_end_str)
+                )
+                if lbl_expenses_cmp is not None:
+                    lbl_expenses_cmp.configure(text=format_amount(-cmp_exp_total))
+                if lbl_refunds_cmp is not None:
+                    lbl_refunds_cmp.configure(text=format_amount(-cmp_refunds_total))
+                if lbl_expenses_delta is not None:
+                    diff_exp = (-expenses_total) - (-cmp_exp_total)
+                    try:
+                        lbl_expenses_delta.configure(
+                            text=f"Δ {format_amount(diff_exp)}",
+                            text_color="#2a9d8f" if diff_exp >= 0 else "#d62828",
+                        )
+                    except Exception:
+                        lbl_expenses_delta.configure(text=f"Δ {format_amount(diff_exp)}")
+                if lbl_refunds_delta is not None:
+                    diff_ref = (-refunds_total) - (-cmp_refunds_total)
+                    try:
+                        lbl_refunds_delta.configure(
+                            text=f"Δ {format_amount(diff_ref)}",
+                            text_color="#2a9d8f" if diff_ref >= 0 else "#d62828",
+                        )
+                    except Exception:
+                        lbl_refunds_delta.configure(text=f"Δ {format_amount(diff_ref)}")
                 cmp_net = cmp_val - cmp_exp_total
                 if lbl_net_cmp is not None:
                     lbl_net_cmp.configure(text=format_amount(cmp_net))
@@ -4408,18 +4659,44 @@ def run_ui(db_path: Path) -> None:
                     diff_net = net_profit - cmp_net
                     pct_net = (diff_net / cmp_net * 100.0) if cmp_net else None
                     pct_net_txt = f" ({pct_net:+.1f}%)" if pct_net is not None else ""
-                    lbl_net_delta.configure(
-                        text=f"Δ {format_amount(diff_net)}{pct_net_txt}"
-                    )
+                    try:
+                        lbl_net_delta.configure(
+                            text=f"Δ {format_amount(diff_net)}{pct_net_txt}",
+                            text_color="#2a9d8f" if diff_net >= 0 else "#d62828",
+                        )
+                    except Exception:
+                        lbl_net_delta.configure(
+                            text=f"Δ {format_amount(diff_net)}{pct_net_txt}"
+                        )
             else:
                 if lbl_cmp is not None:
                     lbl_cmp.configure(text="-")
                 if lbl_delta is not None:
-                    lbl_delta.configure(text="")
+                    try:
+                        lbl_delta.configure(text="", text_color=None)
+                    except Exception:
+                        lbl_delta.configure(text="")
                 if lbl_net_cmp is not None:
                     lbl_net_cmp.configure(text="-")
                 if lbl_net_delta is not None:
-                    lbl_net_delta.configure(text="")
+                    try:
+                        lbl_net_delta.configure(text="", text_color=None)
+                    except Exception:
+                        lbl_net_delta.configure(text="")
+                if lbl_expenses_cmp is not None:
+                    lbl_expenses_cmp.configure(text="-")
+                if lbl_refunds_cmp is not None:
+                    lbl_refunds_cmp.configure(text="-")
+                if lbl_expenses_delta is not None:
+                    try:
+                        lbl_expenses_delta.configure(text="", text_color=None)
+                    except Exception:
+                        lbl_expenses_delta.configure(text="")
+                if lbl_refunds_delta is not None:
+                    try:
+                        lbl_refunds_delta.configure(text="", text_color=None)
+                    except Exception:
+                        lbl_refunds_delta.configure(text="")
 
             unpaid_cnt, unpaid_sum = get_unpaid_sp_orders_summary(conn, None, None)
             unpaid_var.set(f"{unpaid_cnt} | {format_amount(unpaid_sum)}")
@@ -4492,56 +4769,76 @@ def run_ui(db_path: Path) -> None:
                     ax_monthly.grid(axis="y", alpha=0.25)
                     ax_monthly.legend(loc="upper left")
 
-                    # Hover tooltip (one-time wiring per canvas)
-                    tooltip = ctx.state.get("fin_monthly_tooltip")
-                    if not tooltip:
-                        annot = ax_monthly.annotate(
-                            "",
-                            xy=(0, 0),
-                            xytext=(12, 12),
-                            textcoords="offset points",
-                            bbox=dict(
-                                boxstyle="round", fc="white", ec="#666666", alpha=0.95
-                            ),
-                            arrowprops=dict(arrowstyle="->", color="#666666"),
+                    # Hover tooltip (must survive refresh/redraw)
+                    tooltip = ctx.state.setdefault("fin_monthly_tooltip", {})
+                    prev_canvas = tooltip.get("canvas")
+                    tooltip["ax"] = ax_monthly
+                    tooltip["canvas"] = canvas_monthly
+                    if prev_canvas is not None and prev_canvas is not canvas_monthly:
+                        tooltip.pop("cid_motion", None)
+                        tooltip.pop("cid_leave", None)
+
+                    # `ax_monthly.clear()` removes old artists, so recreate annotation each refresh.
+                    annot = ax_monthly.annotate(
+                        "",
+                        xy=(0, 0),
+                        xytext=(12, 12),
+                        textcoords="offset points",
+                        bbox=dict(boxstyle="round", fc="white", ec="#666666", alpha=0.95),
+                        arrowprops=dict(arrowstyle="->", color="#666666"),
+                    )
+                    annot.set_visible(False)
+                    tooltip["annot"] = annot
+
+                    def _on_fin_hover(event, _ctx=ctx):
+                        t = _ctx.state.get("fin_monthly_tooltip") or {}
+                        ax = t.get("ax")
+                        canvas = t.get("canvas")
+                        annot = t.get("annot")
+                        if canvas is None or annot is None:
+                            return
+                        if event.inaxes != ax:
+                            if annot.get_visible():
+                                annot.set_visible(False)
+                                canvas.draw_idle()
+                            return
+
+                        items = t.get("items") or []
+                        for patch, series, lab, val in items:
+                            contains, _ = patch.contains(event)
+                            if not contains:
+                                continue
+                            xmid = patch.get_x() + patch.get_width() / 2.0
+                            ytop = patch.get_y() + patch.get_height()
+                            annot.xy = (xmid, ytop)
+                            annot.set_text(f"{series} {lab}: {format_display_amount(val)}")
+                            annot.set_visible(True)
+                            canvas.draw_idle()
+                            return
+
+                        if annot.get_visible():
+                            annot.set_visible(False)
+                            canvas.draw_idle()
+
+                    def _on_fin_leave(_event, _ctx=ctx):
+                        t = _ctx.state.get("fin_monthly_tooltip") or {}
+                        canvas = t.get("canvas")
+                        annot = t.get("annot")
+                        if canvas is None or annot is None:
+                            return
+                        if annot.get_visible():
+                            annot.set_visible(False)
+                            canvas.draw_idle()
+
+                    # Wire events once per canvas (avoid multiple handlers).
+                    if tooltip.get("cid_motion") is None:
+                        tooltip["cid_motion"] = canvas_monthly.mpl_connect(
+                            "motion_notify_event", _on_fin_hover
                         )
-                        annot.set_visible(False)
-                        tooltip = {"annot": annot, "items": []}
-                        ctx.state["fin_monthly_tooltip"] = tooltip
-
-                        def _on_fin_hover(event):
-                            if event.inaxes != ax_monthly:
-                                annot.set_visible(False)
-                                canvas_monthly.draw_idle()
-                                return
-                            items = (
-                                ctx.state.get("fin_monthly_tooltip", {}).get("items")
-                                or []
-                            )
-                            for patch, series, lab, val in items:
-                                contains, _ = patch.contains(event)
-                                if not contains:
-                                    continue
-                                xmid = patch.get_x() + patch.get_width() / 2.0
-                                ytop = patch.get_y() + patch.get_height()
-                                annot.xy = (xmid, ytop)
-                                annot.set_text(
-                                    f"{series} {lab}: {format_display_amount(val)}"
-                                )
-                                annot.set_visible(True)
-                                canvas_monthly.draw_idle()
-                                return
-                            if annot.get_visible():
-                                annot.set_visible(False)
-                                canvas_monthly.draw_idle()
-
-                        def _on_fin_leave(_event):
-                            if annot.get_visible():
-                                annot.set_visible(False)
-                                canvas_monthly.draw_idle()
-
-                        canvas_monthly.mpl_connect("motion_notify_event", _on_fin_hover)
-                        canvas_monthly.mpl_connect("figure_leave_event", _on_fin_leave)
+                    if tooltip.get("cid_leave") is None:
+                        tooltip["cid_leave"] = canvas_monthly.mpl_connect(
+                            "figure_leave_event", _on_fin_leave
+                        )
 
                     # Update hover items every refresh (new patches each draw)
                     items = []
@@ -4590,9 +4887,16 @@ def run_ui(db_path: Path) -> None:
         start = state.get("period_start")
         end = state.get("period_end")
         top_customers = get_top_customers(conn, 5, period_days, start, end)
-        top_products = get_top_products(conn, 10, period_days, start, end)
-        monthly = get_sp_bank_monthly(conn, period_days, start, end)
+        top_products = get_top_products_qty(conn, 10, period_days, start, end)
+        top_categories = get_top_categories_qty_share(
+            conn, 5, period_days, start, end, categorize_sku=kategorija_za_sifru
+        )
         conn.close()
+
+        try:
+            from matplotlib.ticker import MaxNLocator
+        except Exception:
+            MaxNLocator = None
 
         ax_customers.clear()
         if top_customers:
@@ -4613,8 +4917,10 @@ def run_ui(db_path: Path) -> None:
             values_rev = values[::-1]
             y_pos = list(range(len(labels_rev)))
             bars = ax_customers.barh(y_pos, values_rev, color="#5aa9e6")
-            ax_customers.set_title(f"Top 5 kupaca ({chart_currency_label()})")
+            ax_customers.set_title("Top 5 kupaca")
             ax_customers.tick_params(axis="y", left=False, labelleft=False)
+            if MaxNLocator is not None:
+                ax_customers.xaxis.set_major_locator(MaxNLocator(nbins=5))
             outside_labels = []
             outside_positions = []
             inside_labels = []
@@ -4654,13 +4960,15 @@ def run_ui(db_path: Path) -> None:
         ax_products.clear()
         if top_products:
             names = [f"{r[0]} ({int(r[1] or 0)})" for r in top_products]
-            values = [chart_value(r[2]) for r in top_products]
+            values = [float(r[1] or 0.0) for r in top_products]
             names_rev = names[::-1]
             values_rev = values[::-1]
             y_pos = list(range(len(names_rev)))
             bars = ax_products.barh(y_pos, values_rev, color="#7cb518")
-            ax_products.set_title(f"Top 10 artikala ({chart_currency_label()})")
+            ax_products.set_title("Top 10 artikala")
             ax_products.tick_params(axis="y", left=False, labelleft=False)
+            if MaxNLocator is not None:
+                ax_products.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
             ax_products.bar_label(
                 bars,
                 labels=names_rev,
@@ -4674,25 +4982,57 @@ def run_ui(db_path: Path) -> None:
         canvas_products.draw()
 
         ax_sp_bank.clear()
-        if monthly:
-            periods = [r[0] for r in monthly]
-            income = [r[1] or 0 for r in monthly]
-            expense = [r[2] or 0 for r in monthly]
-            x = range(len(periods))
-            ax_sp_bank.bar(x, income, width=0.4, label="Prihodi", color="#5aa9e6")
-            ax_sp_bank.bar(
-                [i + 0.4 for i in x],
-                expense,
-                width=0.4,
-                label="Rashodi",
-                color="#f28482",
+        if top_categories:
+            cats_rev = [str(r[0]) for r in top_categories][::-1]
+            pct_rev = [float(r[2] or 0.0) for r in top_categories][::-1]
+            qty_rev = [float(r[1] or 0.0) for r in top_categories][::-1]
+            y_pos = list(range(len(cats_rev)))
+            bars = ax_sp_bank.barh(y_pos, pct_rev, color="#ffb703")
+            ax_sp_bank.set_title("Top 5 grupa (udio komada)")
+            ax_sp_bank.set_xlim(0, 100)
+            ax_sp_bank.tick_params(axis="y", left=False, labelleft=False)
+            inside_labels = []
+            outside_labels = []
+            outside_positions = []
+            for bar, cat, p, qty in zip(bars, cats_rev, pct_rev, qty_rev):
+                ratio = float(p or 0.0) / 100.0
+                label = _fit_two_line_label(
+                    str(cat),
+                    f"{p:.1f}%",
+                    f"{int(qty)} kom",
+                    ratio,
+                )
+                full_label = f"{cat}\n{p:.1f}% | {int(qty)} kom"
+                # With 0..100 x-axis, most category shares are <22% and won't fit inside the bar.
+                if ratio < 0.22:
+                    outside_labels.append(full_label)
+                    outside_positions.append(bar)
+                    inside_labels.append("")
+                else:
+                    inside_labels.append(label)
+
+            ax_sp_bank.bar_label(
+                bars,
+                labels=inside_labels,
+                label_type="center",
+                padding=0,
+                color="white",
+                fontsize=9,
             )
-            ax_sp_bank.set_xticks(list(x))
-            ax_sp_bank.set_xticklabels(periods, rotation=45, ha="right")
-            ax_sp_bank.set_title("Prihodi vs rashodi (banka, BAM)")
-            ax_sp_bank.legend()
+            if outside_positions:
+                offset = 2.0
+                for bar, label in zip(outside_positions, outside_labels):
+                    ax_sp_bank.text(
+                        bar.get_width() + offset,
+                        bar.get_y() + bar.get_height() / 2,
+                        label,
+                        va="center",
+                        ha="left",
+                        fontsize=9,
+                        color="black",
+                    )
         else:
-            ax_sp_bank.set_title("Prihodi vs rashodi (nema podataka)")
+            ax_sp_bank.set_title("Top 5 grupa (nema podataka)")
         canvas_sp_bank.draw()
 
     def refresh_expenses():
@@ -5330,6 +5670,202 @@ def run_ui(db_path: Path) -> None:
         ent_db.insert(0, path)
         ent_db.configure(state="readonly")
         refresh_dashboard()
+
+    def _start_import_jobs(
+        jobs: list[tuple[str, Callable[..., Any], Path]],
+        *,
+        activity_label: str,
+        log_title: str,
+        after_done: Callable[[int], Any] | None = None,
+    ) -> None:
+        if not jobs:
+            messagebox.showwarning("Info", "Nema fajlova za import.")
+            return
+
+        ctx.state["import_busy"] = True
+        ctx.state["import_cancel"] = False
+        try:
+            btn = ctx.state.get("btn_cancel_import")
+            if btn is not None:
+                btn.configure(state="normal")
+        except Exception:
+            pass
+
+        log_app_event(
+            "import_async",
+            "start",
+            title=log_title,
+            files=len(jobs),
+            db=str(state.get("db_path")),
+        )
+
+        for btn in ctx.action_buttons or []:
+            btn.configure(state="disabled")
+        ctx.progress.configure(mode="determinate")
+        ctx.progress.set(0)
+        ctx.progress_pct_var.set("Napredak: 0%")
+        ctx.status_var.set(activity_label)
+
+        progress = {"idx": 0, "total": len(jobs), "done": False}
+        result = {
+            "imported": 0,
+            "skipped": 0,
+            "failed": 0,
+            "rejects": [],
+            "by_title": {},
+        }
+
+        def worker():
+            conn = get_conn()
+            try:
+                for idx, (title, import_fn, path) in enumerate(jobs, start=1):
+                    if ctx.state.get("closing") or ctx.state.get("import_cancel"):
+                        break
+                    by_title = result["by_title"]
+                    if title not in by_title:
+                        by_title[title] = {"imported": 0, "skipped": 0, "failed": 0}
+                    try:
+                        digest = file_hash(path)
+                        exists = conn.execute(
+                            "SELECT 1 FROM import_runs WHERE file_hash = ?",
+                            (digest,),
+                        ).fetchone()
+                        if exists:
+                            result["skipped"] += 1
+                            by_title[title]["skipped"] += 1
+                            append_reject(
+                                result["rejects"],
+                                title,
+                                path.name,
+                                None,
+                                "file_already_imported",
+                                "",
+                            )
+                        else:
+                            try:
+                                import_fn(conn, path, result["rejects"])
+                                result["imported"] += 1
+                                by_title[title]["imported"] += 1
+                            except Exception as exc:
+                                result["failed"] += 1
+                                by_title[title]["failed"] += 1
+                                append_reject(
+                                    result["rejects"],
+                                    title,
+                                    path.name,
+                                    None,
+                                    "file_failed",
+                                    str(exc),
+                                )
+                                log_app_error("import_async", f"{title} {path.name}: {exc}")
+                    except Exception as exc:
+                        result["failed"] += 1
+                        by_title[title]["failed"] += 1
+                        append_reject(
+                            result["rejects"],
+                            title,
+                            path.name,
+                            None,
+                            "file_failed",
+                            str(exc),
+                        )
+                        log_app_error("import_async", f"{title} {path.name}: {exc}")
+                    finally:
+                        progress["idx"] = idx
+                progress["done"] = True
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll():
+            if ctx.state.get("closing"):
+                return
+            total = int(progress.get("total") or 0)
+            idx = int(progress.get("idx") or 0)
+            pct = (idx / total) if total else 1.0
+            ctx.progress.set(pct)
+            ctx.progress_pct_var.set(f"Napredak: {int(pct * 100)}% ({idx}/{total})")
+            ctx.status_var.set(f"{activity_label} {idx}/{total}")
+
+            if not progress.get("done"):
+                app.after(200, poll)
+                return
+
+            # Done
+            ctx.state["import_busy"] = False
+            try:
+                btn = ctx.state.get("btn_cancel_import")
+                if btn is not None:
+                    btn.configure(state="disabled")
+            except Exception:
+                pass
+            for btn in ctx.action_buttons or []:
+                btn.configure(state="normal")
+            ctx.status_var.set("Spremno.")
+            ctx.progress.set(1)
+            ctx.progress_pct_var.set("Napredak: 100%")
+
+            imported = int(result.get("imported") or 0)
+            skipped = int(result.get("skipped") or 0)
+            failed = int(result.get("failed") or 0)
+            rejects = result.get("rejects") or []
+            by_title = result.get("by_title") or {}
+
+            lines = []
+            for name, cnt in by_title.items():
+                imp = int((cnt or {}).get("imported") or 0)
+                sk = int((cnt or {}).get("skipped") or 0)
+                fl = int((cnt or {}).get("failed") or 0)
+                if imp or sk or fl:
+                    lines.append(f"{name}: uvezeno {imp}, preskoceno {sk}, gresaka {fl}")
+            summary = "\n".join(lines) if lines else "(nema promjena)"
+            msg = (
+                "Import zavrsen.\n\n"
+                f"Uvezeno: {imported}\nPreskoceno: {skipped}\nGresaka: {failed}\n\n"
+                "Detaljno:\n"
+                f"{summary}"
+            )
+            messagebox.showinfo("OK", msg)
+
+            log_app_event(
+                "import_async",
+                "done",
+                title=log_title,
+                imported=imported,
+                skipped=skipped,
+                failed=failed,
+                rejects=len(rejects),
+            )
+
+            if rejects:
+                try:
+                    ts = datetime.now().strftime("%Y%m%d%H%M%S")
+                    out_path = Path("exports") / f"rejected-rows-{ts}.xlsx"
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    pd.DataFrame(rejects).to_excel(out_path, index=False)
+                    try:
+                        os.startfile(out_path)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    log_app_error("import_async", f"rejects_export: {exc}")
+
+            try:
+                refresh_dashboard()
+            except Exception:
+                pass
+
+            if after_done is not None:
+                try:
+                    after_done(imported)
+                except Exception:
+                    pass
+
+        poll()
 
     def run_import_folder(import_fn, title: str, pattern: str) -> int:
         folder = filedialog.askdirectory(title=title)
@@ -6530,8 +7066,14 @@ def run_ui(db_path: Path) -> None:
             ctx.progress.start()
 
         future = ctx.executor.submit(fn, *args)
+        try:
+            ctx.state.setdefault("active_futures", set()).add(future)
+        except Exception:
+            pass
 
         def poll():
+            if ctx.state.get("closing"):
+                return
             if progress_task:
                 info = get_progress_info(progress_task)
                 if info is not None:
@@ -6594,6 +7136,11 @@ def run_ui(db_path: Path) -> None:
                 messagebox.showerror("Greska", str(exc))
                 ctx.status_var.set("Greska.")
                 return
+            finally:
+                try:
+                    ctx.state.get("active_futures", set()).discard(future)
+                except Exception:
+                    pass
             ctx.status_var.set("Zavrseno.")
             task_status_var.set("Task: zavrseno")
             if ctx.refresh_dashboard:
@@ -6702,6 +7249,27 @@ def run_ui(db_path: Path) -> None:
     ctk.CTkButton(top, text="Osvjezi", command=on_global_refresh).pack(
         side="left", padx=6
     )
+
+    def on_cancel_import():
+        if not ctx.state.get("import_busy"):
+            return
+        if not messagebox.askyesno(
+            "Prekini uvoz",
+            "Uvoz je u toku.\n\nŽeliš li prekinuti uvoz?\n"
+            "Već upisani fajlovi ostaju u bazi; trenutni fajl može biti prekinut.",
+        ):
+            return
+        ctx.state["import_cancel"] = True
+        try:
+            ctx.status_var.set("Prekid uvoza...")
+        except Exception:
+            pass
+
+    btn_cancel_import = ctk.CTkButton(
+        top, text="Prekini uvoz", command=on_cancel_import, state="disabled"
+    )
+    btn_cancel_import.pack(side="left", padx=6)
+    ctx.state["btn_cancel_import"] = btn_cancel_import
 
     def refresh_external_views():
         _sku_daily_cache["df"] = pd.DataFrame()
@@ -6985,8 +7553,21 @@ def run_ui(db_path: Path) -> None:
     base_imports.pack(anchor="w", fill="x", padx=6, pady=(0, 10))
 
     def run_import_with_financial_prompt(import_fn, title: str, pattern: str):
-        imported = run_import_folder(import_fn, title, pattern)
-        maybe_prompt_financial_refresh(imported_any=imported > 0)
+        folder = filedialog.askdirectory(title=title)
+        if not folder:
+            return
+        files = sorted(Path(folder).glob(pattern))
+        files = [p for p in files if p.is_file()]
+        if not files:
+            messagebox.showwarning("Info", f"Nema fajlova za import ({pattern}).")
+            return
+        jobs = [(title, import_fn, p) for p in files]
+        _start_import_jobs(
+            jobs,
+            activity_label="Uvoz",
+            log_title=title,
+            after_done=lambda imported: maybe_prompt_financial_refresh(imported_any=imported > 0),
+        )
 
     ctk.CTkButton(base_imports, text="Zadnji uvozi", command=show_last_imports).pack(
         anchor="w", pady=(2, 8)
@@ -7077,9 +7658,90 @@ def run_ui(db_path: Path) -> None:
     btn_refresh_external.pack(side="left", padx=(0, 6))
 
     btn_regen = ctk.CTkButton(
-        metrics_row, text="Regenerisi metrike", command=confirm_regen_metrics
+        metrics_row, text="Uvezi nove kart. artik.", command=confirm_regen_metrics
     )
     btn_regen.pack(side="left", padx=6)
+
+    def run_reset_kartice_prijemi():
+        if state.get("baseline_locked"):
+            messagebox.showerror("Greska", "Baza je zakljucana. Reset nije dozvoljen.")
+            return
+        if not messagebox.askyesno(
+            "Potvrda",
+            "Ovo ce obrisati podatke za:\n"
+            "- Kartice artikala (events)\n"
+            "- SP Prijemi (prijemi)\n"
+            "- lokalne CSV metrike (sku_daily_metrics, summary, promo)\n\n"
+            "Nakon toga mozes ponovo pokrenuti 'Uvezi nove kart. artik.' i/ili uvoz SP Prijema.\n\n"
+            "Nastaviti?",
+        ):
+            return
+
+        conn = get_conn()
+        try:
+            stored_hash = get_app_state(conn, "reset_password_hash")
+        finally:
+            conn.close()
+        if not stored_hash:
+            messagebox.showerror("Greska", "Nije postavljena lozinka za reset.")
+            return
+        typed = reset_pass_var.get().strip()
+        if not typed or hash_password(typed) != stored_hash:
+            messagebox.showerror("Greska", "Pogresna lozinka za reset.")
+            return
+
+        backup_path = state["db_path"].with_suffix(
+            f".bak-{datetime.now().strftime('%Y%m%d%H%M%S')}-reset-kartice-prijemi"
+        )
+        try:
+            if state["db_path"].exists():
+                shutil.copy2(state["db_path"], backup_path)
+        except Exception as exc:
+            messagebox.showerror("Greska", f"Backup neuspjesan: {exc}")
+            return
+
+        conn = get_conn()
+        try:
+            deleted_runs = 0
+            deleted_runs += _reset_source(conn, "kartice_events")
+            deleted_runs += _reset_source(conn, "sp_prijemi")
+        except Exception as exc:
+            messagebox.showerror("Greska", str(exc))
+            return
+        finally:
+            conn.close()
+
+        # Clear generated CSV outputs so UI doesn't show stale metrics.
+        out_dir = Path("Kalkulacije_kartice_art/izlaz")
+        for p in [
+            out_dir / "sku_daily_metrics.csv",
+            out_dir / "kartice_sku_summary.csv",
+            out_dir / "sku_promo_periods.csv",
+            out_dir / "kartice_zero_intervali.csv",
+            out_dir / "kartice_events.csv",
+        ]:
+            try:
+                if p.exists() and p.is_file():
+                    p.unlink()
+            except Exception:
+                pass
+
+        _sku_daily_cache["mtime"] = None
+        _sku_summary_cache["mtime"] = None
+        _promo_cache["mtime"] = None
+        refresh_kartice_status()
+        refresh_dashboard()
+        messagebox.showinfo(
+            "OK",
+            "Reset zavrsen (Kartice + SP Prijemi).\n"
+            f"Obrisano import runova: {deleted_runs}\n"
+            f"Backup: {backup_path.name}",
+        )
+
+    btn_reset_kartice_prijemi = ctk.CTkButton(
+        metrics_row, text="Reset kartice+prijemi", command=run_reset_kartice_prijemi
+    )
+    btn_reset_kartice_prijemi.pack(side="left", padx=6)
 
     regen_progress = ctk.CTkProgressBar(settings_body, mode="determinate")
     regen_progress.set(0)
@@ -7107,73 +7769,58 @@ def run_ui(db_path: Path) -> None:
             "Uvezi sve podatke",
             "Ovo ce pokusati uvesti sve izvore iz default foldera projekta, jedan po jedan,\n"
             "zatim (opcionalno) osvjeziti finansijske podatke (Match),\n"
-            "i na kraju pokrenuti 'Regenerisi metrike'.\n\n"
+            "i na kraju pokrenuti 'Uvezi nove kart. artik.'.\n\n"
             "Nastaviti?",
         ):
             return
-        totals = []
-        totals.append(
-            ("SP Narudzbe",)
-            + run_import_default_folder(
-                _resolve_existing_folder("SP Narudzbe", "SP-Narudzbe")
-                or Path("SP Narudzbe"),
-                import_sp_orders,
+        specs = [
+            (
                 "SP Narudzbe (auto)",
+                _resolve_existing_folder("SP Narudzbe", "SP-Narudzbe") or Path("SP Narudzbe"),
+                import_sp_orders,
                 "*.xlsx",
-                silent_missing=True,
-            )
-        )
-        totals.append(
-            ("Minimax",)
-            + run_import_default_folder(
-                _resolve_existing_folder("Minimax") or Path("Minimax"),
-                import_minimax,
-                "Minimax (auto)",
-                "*.xlsx",
-                silent_missing=True,
-            )
-        )
-        totals.append(
-            ("SP Uplate",)
-            + run_import_default_folder(
+            ),
+            ("Minimax (auto)", _resolve_existing_folder("Minimax") or Path("Minimax"), import_minimax, "*.xlsx"),
+            (
+                "SP Uplate (auto)",
                 _resolve_existing_folder("SP Uplate", "SP-Uplate") or Path("SP Uplate"),
                 import_sp_payments,
-                "SP Uplate (auto)",
                 "*.xlsx",
-                silent_missing=True,
-            )
-        )
-        totals.append(
-            ("Banka XML",)
-            + run_import_default_folder(
+            ),
+            (
+                "Banka XML (auto)",
                 _resolve_existing_folder("Banka XML", "Izvodi") or Path("Banka XML"),
                 import_bank_xml,
-                "Banka XML (auto)",
                 "*.xml",
-                silent_missing=True,
-            )
-        )
-        totals.append(
-            ("SP Preuzimanja",)
-            + run_import_default_folder(
-                _resolve_existing_folder("SP Preuzimanja", "SP-Preuzimanja")
-                or Path("SP Preuzimanja"),
-                import_sp_returns,
+            ),
+            (
                 "SP Preuzimanja (auto)",
+                _resolve_existing_folder("SP Preuzimanja", "SP-Preuzimanja") or Path("SP Preuzimanja"),
+                import_sp_returns,
                 "*.xlsx",
-                silent_missing=True,
-            )
-        )
-        msg_lines = []
-        for name, imp, skip in totals:
-            if imp == 0 and skip == 0:
+            ),
+        ]
+        jobs: list[tuple[str, Callable[..., Any], Path]] = []
+        for title, folder, fn, pattern in specs:
+            try:
+                if not folder.exists():
+                    continue
+                for p in sorted(folder.glob(pattern)):
+                    if p.is_file():
+                        jobs.append((title, fn, p))
+            except Exception:
                 continue
-            msg_lines.append(f"{name}: uvezeno {imp}, preskoceno {skip}")
-        if msg_lines:
-            messagebox.showinfo("Info", "Uvoz zavrsen:\n" + "\n".join(msg_lines))
-        total_imported = sum(imp for _, imp, _ in totals)
-        maybe_prompt_financial_refresh(
-            after_done=confirm_regen_metrics, imported_any=total_imported > 0
+        if not jobs:
+            messagebox.showinfo("Info", "Nema novih fajlova u default folderima.")
+            return
+
+        _start_import_jobs(
+            jobs,
+            activity_label="Uvoz (auto)",
+            log_title="Uvezi sve podatke (auto)",
+            after_done=lambda imported: maybe_prompt_financial_refresh(
+                after_done=confirm_regen_metrics, imported_any=imported > 0
+            ),
         )
 
     btn_import_all = ctk.CTkButton(
@@ -7190,6 +7837,7 @@ def run_ui(db_path: Path) -> None:
         btn_import_all,
         btn_refresh_external,
         btn_regen,
+        btn_reset_kartice_prijemi,
     ]
 
     ctk.CTkLabel(settings_body, text="Kurs i valuta").pack(

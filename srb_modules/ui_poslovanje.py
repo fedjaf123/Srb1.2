@@ -85,7 +85,7 @@ def build_poslovanje_tab(
     btn_export.pack(anchor="w", pady=6)
     btn_export_unmatched = ctk.CTkButton(
         akcije_frame,
-        text="Export neuparene",
+        text="Export neuparene (razlozi)",
         command=lambda: run_export_single(report_unmatched_reasons, "unmatched-reasons"),
     )
     btn_export_unmatched.pack(anchor="w", pady=2)

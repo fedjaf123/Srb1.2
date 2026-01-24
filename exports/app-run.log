@@ -1,0 +1,51 @@
+{"ts": "2026-01-23 07:42:02", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 07:43:59", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 07:48:50", "source": "import_folder", "message": "start", "title": "Minimax (folder)", "folder": "C:/Users/HOME/Desktop/Srbija1.2 aplikacija - Copy/Minimax", "pattern": "*.xlsx", "files": 2, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 07:48:56", "source": "import_folder", "message": "done", "title": "Minimax (folder)", "imported": 1, "skipped": 1, "rejects": 1}
+{"ts": "2026-01-23 07:49:11", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 07:51:05", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 07:58:08", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 08:00:00", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 16:55:30", "source": "import_folder", "message": "start", "title": "SP Narudzbe (folder)", "folder": "C:/Users/HOME/Desktop/Srbija1.2 aplikacija - Copy/SP Narudzbe", "pattern": "*.xlsx", "files": 121, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 16:55:41", "source": "import_folder", "message": "done", "title": "SP Narudzbe (folder)", "imported": 121, "skipped": 0, "rejects": 1567}
+{"ts": "2026-01-23 16:57:56", "source": "refresh_finansije", "message": "database is locked", "level": "error"}
+{"ts": "2026-01-23 17:11:59", "source": "import_folder", "message": "start", "title": "SP Narudzbe (folder)", "folder": "C:/Users/HOME/Desktop/Srbija1.2 aplikacija - Copy/SP Narudzbe", "pattern": "*.xlsx", "files": 121, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 17:12:03", "source": "import_folder", "message": "done", "title": "SP Narudzbe (folder)", "imported": 0, "skipped": 121, "rejects": 121}
+{"ts": "2026-01-23 17:12:18", "source": "import_folder", "message": "start", "title": "Minimax (folder)", "folder": "C:/Users/HOME/Desktop/Srbija1.2 aplikacija - Copy/Minimax", "pattern": "*.xlsx", "files": 2, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 17:12:23", "source": "import_folder", "message": "done", "title": "Minimax (folder)", "imported": 2, "skipped": 0, "rejects": 0}
+{"ts": "2026-01-23 17:12:59", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 17:16:03", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 18:50:06", "source": "import_folder", "message": "start", "title": "SP Uplate (folder)", "folder": "C:/Users/HOME/Desktop/Srbija1.2 aplikacija - Copy/SP Uplate", "pattern": "*.xlsx", "files": 171, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 18:50:09", "source": "import_folder", "message": "done", "title": "SP Uplate (folder)", "imported": 1, "skipped": 170, "rejects": 228}
+{"ts": "2026-01-23 18:50:33", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 18:53:25", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 19:33:30", "source": "import_async", "message": "start", "title": "SP Narudzbe (folder)", "files": 121, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 19:33:40", "source": "import_async", "message": "done", "title": "SP Narudzbe (folder)", "imported": 121, "skipped": 0, "failed": 0, "rejects": 1567}
+{"ts": "2026-01-23 19:35:12", "source": "import_async", "message": "start", "title": "SP Narudzbe (folder)", "files": 121, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 19:35:21", "source": "import_async", "message": "done", "title": "SP Narudzbe (folder)", "imported": 121, "skipped": 0, "failed": 0, "rejects": 1567}
+{"ts": "2026-01-23 19:45:01", "source": "import_async", "message": "start", "title": "Minimax (folder)", "files": 2, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 19:45:06", "source": "import_async", "message": "done", "title": "Minimax (folder)", "imported": 2, "skipped": 0, "failed": 0, "rejects": 0}
+{"ts": "2026-01-23 19:45:21", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 19:46:33", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 20:03:31", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 20:04:29", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 20:06:36", "source": "import_async", "message": "start", "title": "Banka XML (folder)", "files": 5, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 20:06:38", "source": "import_async", "message": "done", "title": "Banka XML (folder)", "imported": 0, "skipped": 5, "failed": 0, "rejects": 5}
+{"ts": "2026-01-23 20:07:16", "source": "import_async", "message": "start", "title": "Uvezi sve podatke (auto)", "files": 306, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 20:07:42", "source": "import_async", "message": "done", "title": "Uvezi sve podatke (auto)", "imported": 306, "skipped": 0, "failed": 0, "rejects": 2120}
+{"ts": "2026-01-23 20:07:55", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 20:09:09", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 20:55:20", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 20:56:39", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 21:14:01", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 21:15:00", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 21:24:35", "source": "import_async", "message": "start", "title": "SP Narudzbe (folder)", "files": 121, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 21:24:45", "source": "import_async", "message": "done", "title": "SP Narudzbe (folder)", "imported": 121, "skipped": 0, "failed": 0, "rejects": 1566}
+{"ts": "2026-01-23 21:25:53", "source": "import_async", "message": "start", "title": "Minimax (folder)", "files": 2, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-23 21:26:05", "source": "import_async", "message": "done", "title": "Minimax (folder)", "imported": 2, "skipped": 0, "failed": 0, "rejects": 0}
+{"ts": "2026-01-24 06:42:55", "source": "import_async", "message": "start", "title": "SP Narudzbe (folder)", "files": 121, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-24 06:43:07", "source": "import_async", "message": "done", "title": "SP Narudzbe (folder)", "imported": 121, "skipped": 0, "failed": 0, "rejects": 1566}
+{"ts": "2026-01-24 07:00:13", "source": "import_async", "message": "start", "title": "Uvezi sve podatke (auto)", "files": 306, "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-24 07:00:42", "source": "import_async", "message": "done", "title": "Uvezi sve podatke (auto)", "imported": 306, "skipped": 0, "failed": 0, "rejects": 2128}
+{"ts": "2026-01-24 07:01:01", "source": "financial_refresh", "message": "start", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}
+{"ts": "2026-01-24 07:02:22", "source": "financial_refresh", "message": "done", "db": "C:\\Users\\HOME\\Desktop\\Srbija1.2 aplikacija - Copy\\SRB1.2.db"}

@@ -49,7 +49,7 @@ def build_finansije_tab(
                 pass
             refresh_finansije()
         else:
-            messagebox.showerror("Greska", "Finansije ostaju zaključane.")
+            messagebox.showerror("Greška", "Finansije ostaju zaključane.")
 
     ctk.CTkButton(lock_overlay, text="Otključaj Finansije", command=_try_unlock).pack(
         pady=(0, 20)
@@ -73,6 +73,25 @@ def build_finansije_tab(
 
     period_label_var = ctk.StringVar(value=_fmt_range(None, None))
     compare_label_var = ctk.StringVar(value="-")
+    quick_period_var = ctk.StringVar(value="12 mjeseci")
+
+    def _set_quick_period(choice: str) -> None:
+        mapping = {
+            "Svo vrijeme": None,
+            "1 mjesec": 30,
+            "3 mjeseca": 90,
+            "6 mjeseci": 180,
+            "12 mjeseci": 360,
+            "24 mjeseca": 720,
+        }
+        if choice == "Custom":
+            return
+        ctx.state["fin_period_custom"] = False
+        ctx.state["fin_period_start"] = None
+        ctx.state["fin_period_end"] = None
+        ctx.state["fin_period_days"] = mapping.get(choice)
+        period_label_var.set(choice)
+        refresh_finansije()
 
     def pick_main_period():
         start = ctx.state.get("fin_period_start")
@@ -82,6 +101,10 @@ def build_finansije_tab(
         ctx.state["fin_period_end"] = end
         ctx.state["fin_period_custom"] = True
         period_label_var.set(_fmt_range(start, end))
+        try:
+            quick_period_var.set("Custom")
+        except Exception:
+            pass
         refresh_finansije()
 
     def pick_compare_period():
@@ -104,11 +127,26 @@ def build_finansije_tab(
     ctk.CTkButton(controls, text="Odaberi period", command=pick_main_period).pack(
         side="left", padx=6
     )
+    ctk.CTkOptionMenu(
+        controls,
+        variable=quick_period_var,
+        values=[
+            "Custom",
+            "Svo vrijeme",
+            "1 mjesec",
+            "3 mjeseca",
+            "6 mjeseci",
+            "12 mjeseci",
+            "24 mjeseca",
+        ],
+        command=_set_quick_period,
+        width=130,
+    ).pack(side="left", padx=(6, 6))
     ctk.CTkLabel(controls, textvariable=period_label_var).pack(side="left", padx=10)
 
-    ctk.CTkButton(
-        controls, text="Poredi period", command=pick_compare_period
-    ).pack(side="left", padx=(24, 6))
+    ctk.CTkButton(controls, text="Poredi period", command=pick_compare_period).pack(
+        side="left", padx=(24, 6)
+    )
     ctk.CTkLabel(controls, textvariable=compare_label_var).pack(side="left", padx=10)
     ctk.CTkButton(controls, text="Reset poređenje", command=clear_compare).pack(
         side="left", padx=(12, 6)
@@ -117,13 +155,49 @@ def build_finansije_tab(
     kpi = ctk.CTkFrame(frame)
     kpi.pack(fill="x", padx=6, pady=(0, 6))
 
-    row = ctk.CTkFrame(kpi, fg_color="transparent")
-    row.pack(fill="x", padx=10, pady=(10, 4))
-    ctk.CTkLabel(row, text="Bruto prihod (SP cash, period)").pack(side="left")
-    lbl_net_revenue = ctk.CTkLabel(row, text="0", font=ctk.CTkFont(size=22, weight="bold"))
-    lbl_net_revenue.pack(side="left", padx=12)
-    ctk.CTkButton(row, text="Export cash breakdown", command=export_neto_breakdown).pack(
-        side="left", padx=12
+    table = ctk.CTkFrame(kpi, fg_color="transparent")
+    table.pack(fill="x", padx=10, pady=(10, 10))
+    table.grid_columnconfigure(0, weight=2)
+    table.grid_columnconfigure(1, weight=1)
+    table.grid_columnconfigure(2, weight=1)
+    table.grid_columnconfigure(3, weight=1)
+
+    def _h(text: str, col: int):
+        ctk.CTkLabel(table, text=text, font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0, column=col, sticky="w", padx=6, pady=(0, 6)
+        )
+
+    _h("", 0)
+    _h("Period", 1)
+    _h("Poređenje", 2)
+    _h("Δ", 3)
+
+    def _metric_row(row: int, title: str, *, big: bool = False):
+        ctk.CTkLabel(table, text=title).grid(
+            row=row, column=0, sticky="w", padx=6, pady=2
+        )
+        font_a = ctk.CTkFont(size=20 if big else 16, weight="bold" if big else "normal")
+        font_b = ctk.CTkFont(size=18 if big else 16, weight="bold" if big else "normal")
+        a = ctk.CTkLabel(table, text="0", font=font_a)
+        b = ctk.CTkLabel(table, text="-", font=font_b)
+        d = ctk.CTkLabel(table, text="", font=ctk.CTkFont(size=14))
+        a.grid(row=row, column=1, sticky="w", padx=6, pady=2)
+        b.grid(row=row, column=2, sticky="w", padx=6, pady=2)
+        d.grid(row=row, column=3, sticky="w", padx=6, pady=2)
+        return a, b, d
+
+    lbl_net_revenue, lbl_net_revenue_cmp, lbl_net_revenue_delta = _metric_row(
+        1, "Bruto prihod (SP cash)", big=True
+    )
+    ctk.CTkButton(table, text="Export cash breakdown", command=export_neto_breakdown).grid(
+        row=1, column=0, sticky="e", padx=6, pady=2
+    )
+    lbl_expenses, lbl_expenses_cmp, lbl_expenses_delta = _metric_row(
+        2, "Troškovi (banka)"
+    )
+    lbl_refunds, lbl_refunds_cmp, lbl_refunds_delta = _metric_row(3, "Povrati (banka)")
+    lbl_net_profit, lbl_net_profit_cmp, lbl_net_profit_delta = _metric_row(
+        4, "Neto (Bruto cash - Troškovi)", big=True
     )
 
     ctk.CTkLabel(
@@ -131,78 +205,35 @@ def build_finansije_tab(
         text="Bruto prihod (SP cash) = COD (+dodatno) poslije popusta; 'Vraćeno/Vraceno' se ne računa.",
     ).pack(anchor="w", padx=10, pady=(0, 6))
 
-    row2 = ctk.CTkFrame(kpi, fg_color="transparent")
-    row2.pack(fill="x", padx=10, pady=(0, 10))
-    ctk.CTkLabel(row2, text="Bruto prihod (SP cash, poređenje)").pack(side="left")
-    lbl_net_revenue_cmp = ctk.CTkLabel(
-        row2, text="-", font=ctk.CTkFont(size=18, weight="bold")
-    )
-    lbl_net_revenue_cmp.pack(side="left", padx=12)
-    lbl_net_revenue_delta = ctk.CTkLabel(row2, text="", font=ctk.CTkFont(size=16))
-    lbl_net_revenue_delta.pack(side="left", padx=12)
-
-    row3 = ctk.CTkFrame(kpi, fg_color="transparent")
-    row3.pack(fill="x", padx=10, pady=(0, 10))
-    expenses_var = ctk.StringVar(value="0")
-    refunds_var = ctk.StringVar(value="0")
-    ctk.CTkLabel(row3, text="Troškovi (banka):").pack(side="left")
-    ctk.CTkLabel(row3, textvariable=expenses_var, font=ctk.CTkFont(size=16)).pack(
-        side="left", padx=8
-    )
-    ctk.CTkLabel(row3, text="Povrati (banka):").pack(side="left", padx=(16, 0))
-    ctk.CTkLabel(row3, textvariable=refunds_var, font=ctk.CTkFont(size=16)).pack(
-        side="left", padx=8
-    )
-
-    row4 = ctk.CTkFrame(kpi, fg_color="transparent")
-    row4.pack(fill="x", padx=10, pady=(0, 10))
-    ctk.CTkLabel(row4, text="Neto (Bruto cash - Troškovi):").pack(side="left")
-    lbl_net_profit = ctk.CTkLabel(
-        row4, text="0", font=ctk.CTkFont(size=20, weight="bold")
-    )
-    lbl_net_profit.pack(side="left", padx=12)
-    lbl_net_profit_cmp = ctk.CTkLabel(
-        row4, text="-", font=ctk.CTkFont(size=16, weight="bold")
-    )
-    lbl_net_profit_cmp.pack(side="left", padx=(24, 12))
-    lbl_net_profit_delta = ctk.CTkLabel(row4, text="", font=ctk.CTkFont(size=16))
-    lbl_net_profit_delta.pack(side="left", padx=12)
-
     unpaid = ctk.CTkFrame(frame)
     unpaid.pack(fill="x", padx=6, pady=(0, 6))
-    ctk.CTkLabel(unpaid, text="Neuplaćeno od SP (all-time, isporučeno, bez SP uplate)").pack(
-        anchor="w", padx=10, pady=(10, 2)
-    )
+    ctk.CTkLabel(
+        unpaid, text="Neuplaćeno od SP (all-time, isporučeno, bez SP uplate)"
+    ).pack(anchor="w", padx=10, pady=(10, 2))
     unpaid_row = ctk.CTkFrame(unpaid, fg_color="transparent")
     unpaid_row.pack(fill="x", padx=10, pady=(0, 10))
     unpaid_var = ctk.StringVar(value="0")
-    ctk.CTkLabel(unpaid_row, textvariable=unpaid_var, font=ctk.CTkFont(size=20, weight="bold")).pack(
-        side="left"
+    ctk.CTkLabel(
+        unpaid_row, textvariable=unpaid_var, font=ctk.CTkFont(size=20, weight="bold")
+    ).pack(side="left")
+    ctk.CTkButton(unpaid_row, text="Export detaljno", command=export_unpaid_sp_orders).pack(
+        side="left", padx=12
     )
-    ctk.CTkButton(
-        unpaid_row,
-        text="Export detaljno",
-        command=export_unpaid_sp_orders,
-    ).pack(side="left", padx=12)
 
     pending = ctk.CTkFrame(frame)
     pending.pack(fill="x", padx=6, pady=(0, 6))
-    ctk.CTkLabel(
-        pending, text="Na čekanju (all-time, poslato/u obradi, bez SP uplate)"
-    ).pack(anchor="w", padx=10, pady=(10, 2))
+    ctk.CTkLabel(pending, text="Na čekanju (all-time, poslato/u obradi, bez SP uplate)").pack(
+        anchor="w", padx=10, pady=(10, 2)
+    )
     pending_row = ctk.CTkFrame(pending, fg_color="transparent")
     pending_row.pack(fill="x", padx=10, pady=(0, 10))
     pending_var = ctk.StringVar(value="0")
     ctk.CTkLabel(
-        pending_row,
-        textvariable=pending_var,
-        font=ctk.CTkFont(size=20, weight="bold"),
+        pending_row, textvariable=pending_var, font=ctk.CTkFont(size=20, weight="bold")
     ).pack(side="left")
-    ctk.CTkButton(
-        pending_row,
-        text="Export detaljno",
-        command=export_pending_sp_orders,
-    ).pack(side="left", padx=12)
+    ctk.CTkButton(pending_row, text="Export detaljno", command=export_pending_sp_orders).pack(
+        side="left", padx=12
+    )
 
     charts = ctk.CTkFrame(frame)
     charts.pack(fill="both", expand=True, padx=6, pady=(0, 6))
@@ -220,7 +251,7 @@ def build_finansije_tab(
         messagebox.showinfo(
             "Info",
             "Period u Finansije je nezavisan od Dashboard filtera.\n"
-            "Odaberi period i (opcionalno) poređenje, pa klikni Osvježi ako želiš pun refresh.",
+            "Odaberi period ili quick mjeseci, i (opcionalno) poređenje.",
         )
 
     ctk.CTkButton(frame, text="Pomoć", command=show_help).pack(
@@ -237,11 +268,15 @@ def build_finansije_tab(
         "lbl_net_revenue": lbl_net_revenue,
         "lbl_net_revenue_cmp": lbl_net_revenue_cmp,
         "lbl_net_revenue_delta": lbl_net_revenue_delta,
+        "lbl_expenses": lbl_expenses,
+        "lbl_expenses_cmp": lbl_expenses_cmp,
+        "lbl_expenses_delta": lbl_expenses_delta,
+        "lbl_refunds": lbl_refunds,
+        "lbl_refunds_cmp": lbl_refunds_cmp,
+        "lbl_refunds_delta": lbl_refunds_delta,
         "lbl_net_profit": lbl_net_profit,
         "lbl_net_profit_cmp": lbl_net_profit_cmp,
         "lbl_net_profit_delta": lbl_net_profit_delta,
-        "expenses_var": expenses_var,
-        "refunds_var": refunds_var,
         "unpaid_var": unpaid_var,
         "pending_var": pending_var,
         "period_label_var": period_label_var,
@@ -249,3 +284,4 @@ def build_finansije_tab(
         "ax_monthly": ax_monthly,
         "canvas_monthly": canvas_monthly,
     }
+

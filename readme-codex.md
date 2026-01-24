@@ -281,3 +281,9 @@ Tab `Prodaja` ima podtabove:
 - Konkretno: read-only liste za UI (refund top, unpicked liste, needs_invoice/unmatched liste).
 - UI podijeliti po tabovima u `srb_modules/ui/` (npr. `ui_prodaja.py`).
 - Pipeline incremental (obradi samo novo) + upis metrika u DB.
+Codex Agent Token Policy
+Default mode: low-token execution. Do not produce long plans or explanations. Open the minimum number of files. Never read entire project. Do not refactor unless explicitly requested. Use iterative steps.
+Allowed escalation to HIGH reasoning only if: bug persists after 2 attempts, complex refactor/architecture required, multi-module cross-file dependencies, tricky edge cases, or high-accuracy finance/document logic.
+If escalating, explicitly say: “Escalating reasoning: HIGH because: …”
+Apply “2 attempts rule”: after two failed attempts, escalate or ask one focused question.
+Output format: Status (1 sentence) → Changes (≤5 bullets) → Patch → How to test (≤3 steps).

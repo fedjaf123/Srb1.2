@@ -1,0 +1,13 @@
+{
+  "pdf_name": "Kartica_20260123_075134.pdf",
+  "range_start": "01.01.2026",
+  "range_end": "23.01.2026",
+  "final_end": "23.01.2026",
+  "range_start_iso": "2026-01-01",
+  "range_end_iso": "2026-01-23",
+  "final_end_iso": "2026-01-23",
+  "range_pages": 63,
+  "final_pages": 144,
+  "mismatch_final_vs_range_end": false,
+  "extracted_at": "2026-01-23 20:09:20"
+}

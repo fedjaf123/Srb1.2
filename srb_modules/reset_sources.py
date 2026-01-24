@@ -130,6 +130,14 @@ def reset_source(conn: sqlite3.Connection, key: str) -> int:
         placeholders = ",".join("?" for _ in run_ids)
         conn.execute(f"DELETE FROM kartice_events WHERE import_run_id IN ({placeholders})", run_ids)
         _delete_import_runs(conn, run_ids)
+        _delete_app_state_keys(
+            conn,
+            [
+                "kartice_range_start",
+                "kartice_range_end",
+                "kartice_pdf_name",
+            ],
+        )
         conn.commit()
         return len(run_ids)
 

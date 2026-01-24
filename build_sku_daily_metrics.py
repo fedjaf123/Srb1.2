@@ -187,14 +187,21 @@ def load_sp_price_daily(
         where.append("(o.status IS NULL OR (lower(o.status) NOT LIKE '%otkaz%' AND lower(o.status) NOT LIKE '%vrac%'))")
 
         query = (
+            "WITH od AS ("
+            "  SELECT order_id, MAX(COALESCE(extra_discount, 0)) AS order_discount "
+            "  FROM order_items "
+            "  GROUP BY order_id"
+            ") "
             "SELECT "
             f"{expr} AS d_raw, "
             "TRIM(oi.product_code) AS sku, "
             "COALESCE(oi.qty, 0) AS qty, "
             "COALESCE(oi.cod_amount, 0) AS cod_amount, "
             "COALESCE(oi.discount, 0) AS item_discount, "
-            "COALESCE(oi.extra_discount, 0) AS order_discount "
-            "FROM order_items oi JOIN orders o ON o.id = oi.order_id "
+            "COALESCE(od.order_discount, 0) AS order_discount "
+            "FROM order_items oi "
+            "JOIN orders o ON o.id = oi.order_id "
+            "LEFT JOIN od ON od.order_id = o.id "
             f"WHERE {' AND '.join(where)}"
         )
         rows = conn.execute(query, params).fetchall()
@@ -219,8 +226,11 @@ def load_sp_price_daily(
     df["item_discount"] = pd.to_numeric(df["item_discount"], errors="coerce").fillna(0).clip(lower=0, upper=100)
     df["order_discount"] = pd.to_numeric(df["order_discount"], errors="coerce").fillna(0).clip(lower=0, upper=100)
 
+    # After normalization during SP import, cod_amount is stored as unit price in DB.
+    unit_base = df["cod_amount"]
+
     # Order discount applies first, then item discount.
-    df["net_unit_price"] = df["cod_amount"] * (1 - df["order_discount"] / 100.0) * (1 - df["item_discount"] / 100.0)
+    df["net_unit_price"] = unit_base * (1 - df["order_discount"] / 100.0) * (1 - df["item_discount"] / 100.0)
     df["net_value"] = df["net_unit_price"] * df["qty"]
 
     df["has_discount"] = (df["order_discount"] > 0) | (df["item_discount"] > 0)
